@@ -1,6 +1,6 @@
 // Frida Script for com.saidul.aivideo (AI_Video_Maker)
-// Advanced Security Testing & Analysis Script v4 — DEEP-RECON BUILD
-// MONITORING ONLY — no subscription/premium tampering
+// Advanced Security Testing and Analysis Script v4 - DEEP-RECON BUILD
+// MONITORING ONLY - no subscription/premium tampering
 
 'use strict';
 
@@ -767,7 +767,7 @@ var udKeys = ['premium', 'pro', 'subscription', 'purchased', 'paid', 'trial',
     'seedance', 'pika', 'pixverse', 'kie', 'daily', 'free', 'quota',
     'remaining', 'video', 'generation', 'plan', 'user_id', 'firebase'];
 
-// noise filter — exclude these prefixes/keywords
+// noise filter - exclude these prefixes/keywords
 var udNoise = ['WebKit', 'NSUbiquitous', 'AKLastIDMS', 'PKLogging', 'PKKeychainVersion',
     'NSWindow', 'com.apple', 'AppleKeyboard', '__internal__', 'kCFPreferences'];
 
@@ -1063,7 +1063,7 @@ log('ADS', '✓ AdMob monitoring loaded', C.g);
 
 // ==========================================
 // 11. v4: AUTO-DISCOVERY OF AI_Video_Maker.* CLASSES
-// Hook EVERY method of every app class — full tracer
+// Hook EVERY method of every app class - full tracer
 // ==========================================
 banner('v4 ★ AUTO-TRACER (App Classes)');
 
@@ -1171,14 +1171,14 @@ try {
 // ==========================================
 banner('v4 ★ FULL RESPONSE BODY CAPTURE');
 
-// Hook didReceiveData (delegate method) — catches ALL response bodies
+// Hook didReceiveData (delegate method) - catches ALL response bodies
 try {
     var responseBuffers = {};
 
     // Hook the data delegate callback
     Interceptor.attach(ObjC.classes.NSData['+ dataWithBytes:length:'].implementation, {
         onLeave: function (retval) {
-            // skip — too noisy
+            // skip - too noisy
         }
     });
 
@@ -1257,7 +1257,7 @@ try {
 banner('v4 ★ CRYPTO MONITORING');
 
 try {
-    // CCCrypt — symmetric crypto
+    // CCCrypt - symmetric crypto
     var ccCrypt = Module.findExportByName(null, 'CCCrypt');
     if (ccCrypt) {
         Interceptor.attach(ccCrypt, {
@@ -1312,7 +1312,7 @@ try {
 } catch (e) {}
 
 try {
-    // CCHmac — HMAC operations
+    // CCHmac - HMAC operations
     var ccHmac = Module.findExportByName(null, 'CCHmac');
     if (ccHmac) {
         Interceptor.attach(ccHmac, {
@@ -1489,7 +1489,7 @@ try {
 
 
 // ==========================================
-// 17. v4: STRING SCANNER — find API keys in app binary
+// 17. v4: STRING SCANNER - find API keys in app binary
 // ==========================================
 banner('v4 ★ STRING SCANNER');
 
@@ -1536,7 +1536,7 @@ setTimeout(function () {
             } catch (e) {}
         });
 
-        log('STR', '✓ Scan complete — ' + scanned + ' ranges, ' + Object.keys(found).length + ' secrets', C.g);
+        log('STR', '✓ Scan complete - ' + scanned + ' ranges, ' + Object.keys(found).length + ' secrets', C.g);
     } catch (e) {
         log('STR', 'Error: ' + e.message, C.r);
     }
@@ -1557,7 +1557,7 @@ setInterval(function () {
 }, 30000);
 
 console.log('\n' + C.bg + C.w + C.bold + ' ══════════════════════════════════════════════════════ ' + C.R);
-console.log(C.bg + C.w + C.bold + '  AI_Video_Maker Hook Script v4 — DEEP-RECON BUILD    ' + C.R);
+console.log(C.bg + C.w + C.bold + '  AI_Video_Maker Hook Script v4 - DEEP-RECON BUILD    ' + C.R);
 console.log(C.bg + C.w + C.bold + '  17 modules | monitoring-only | no IAP tampering    ' + C.R);
 console.log(C.bg + C.w + C.bold + '  v4 NEW:                                              ' + C.R);
 console.log(C.bg + C.w + C.bold + '   11. Auto-tracer (every AI_Video_Maker method)     ' + C.R);
