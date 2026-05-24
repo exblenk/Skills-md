@@ -18,7 +18,7 @@
     // X3: App-specific ObjC (GoogleAds/OneSignal/FlutterMethodChannel/canOpenURL/jailbreak ApiResolver/AppDelegate screen)
     var ENABLE_X3 = true;
     // X4: Extended ObjC+ApiResolver (H6 extra/H7 exports/H8 ApiResolver+exports/S3 extended/S12 extended/RevenueCat/Sentry/Firebase)
-    var ENABLE_X4 = true;
+    var ENABLE_X4 = false;
     // ============================================
 
     var TAG = '[BISECT-X]';
