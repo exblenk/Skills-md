@@ -1,12 +1,13 @@
 // Frida Script for com.saidul.aivideo (AI_Video_Maker)
-// Advanced Security Testing & Analysis Script v2
+// Advanced Security Testing & Analysis Script v3
+// Updated based on diff-report analysis (new version)
 
 'use strict';
 
 const C = {
     R: '\x1b[0m', r: '\x1b[31m', g: '\x1b[32m', y: '\x1b[33m',
     b: '\x1b[34m', m: '\x1b[35m', c: '\x1b[36m', w: '\x1b[37m',
-    bg: '\x1b[42m', br: '\x1b[41m',
+    bg: '\x1b[42m', br: '\x1b[41m', by: '\x1b[43m',
 };
 
 function log(tag, msg, color) {
@@ -22,7 +23,7 @@ function banner(text) {
 // ==========================================
 banner('SSL PINNING BYPASS');
 
-// 1a. BoringSSL - Primary iOS TLS engine
+// 1a. BoringSSL
 ['SSL_set_custom_verify', 'SSL_CTX_set_custom_verify'].forEach(function (name) {
     try {
         var addr = Module.findExportByName('libboringssl.dylib', name);
@@ -38,107 +39,73 @@ banner('SSL PINNING BYPASS');
     } catch (e) {}
 });
 
-// 1b. SSL_get_psk_identity - return null to skip PSK
 try {
     var sslVerifyResult = Module.findExportByName('libboringssl.dylib', 'SSL_get_verify_result');
     if (sslVerifyResult) {
         Interceptor.attach(sslVerifyResult, {
-            onLeave: function (retval) {
-                retval.replace(ptr(0x0)); // X509_V_OK
-            }
+            onLeave: function (retval) { retval.replace(ptr(0x0)); }
         });
-        log('SSL', 'SSL_get_verify_result → always OK', C.g);
+        log('SSL', 'SSL_get_verify_result → OK', C.g);
     }
 } catch (e) {}
 
-// 1c. SecTrust* family - complete bypass
-var secTrustFuncs = {
-    'SecTrustEvaluate': function (trust, result) {
-        if (!result.isNull()) result.writeU32(4); // kSecTrustResultProceed
-        return 0; // errSecSuccess
-    },
-    'SecTrustEvaluateWithError': function (trust, error) {
-        if (!error.isNull()) error.writePointer(ptr(0));
-        return 1;
-    },
-    'SecTrustGetTrustResult': function (trust, result) {
+// 1b. SecTrust* family
+var secTrustReplacements = {
+    'SecTrustEvaluate': ['int', ['pointer', 'pointer'], function (trust, result) {
         if (!result.isNull()) result.writeU32(4);
         return 0;
-    },
-    'SecTrustEvaluateAsync': null,
-    'SecTrustEvaluateAsyncWithError': null,
+    }],
+    'SecTrustEvaluateWithError': ['bool', ['pointer', 'pointer'], function (trust, error) {
+        if (!error.isNull()) error.writePointer(ptr(0));
+        return 1;
+    }],
+    'SecTrustGetTrustResult': ['int', ['pointer', 'pointer'], function (trust, result) {
+        if (!result.isNull()) result.writeU32(4);
+        return 0;
+    }],
 };
 
-Object.keys(secTrustFuncs).forEach(function (name) {
+Object.keys(secTrustReplacements).forEach(function (name) {
     try {
         var addr = Module.findExportByName('Security', name);
         if (!addr) return;
-        if (secTrustFuncs[name]) {
-            var types = name.indexOf('WithError') !== -1
-                ? ['bool', ['pointer', 'pointer']]
-                : name === 'SecTrustGetTrustResult'
-                    ? ['int', ['pointer', 'pointer']]
-                    : name === 'SecTrustEvaluate'
-                        ? ['int', ['pointer', 'pointer']]
-                        : ['int', ['pointer', 'pointer']];
-            Interceptor.replace(addr, new NativeCallback(secTrustFuncs[name], types[0], types[1]));
-        } else {
-            Interceptor.attach(addr, {
-                onEnter: function (args) {
-                    // let it pass
-                }
-            });
-        }
+        var spec = secTrustReplacements[name];
+        Interceptor.replace(addr, new NativeCallback(spec[2], spec[0], spec[1]));
         log('SSL', name + ' → bypassed', C.g);
     } catch (e) {}
 });
 
-// 1d. NSURLSession challenge handler
-try {
-    if (ObjC.classes.NSURLSession) {
-        // Override all URLSession delegate auth challenges
-        var resolveChallenge = function (args) {
-            try {
-                var challenge = new ObjC.Object(args[3]);
-                var ps = challenge.protectionSpace();
-                var authMethod = ps.authenticationMethod().toString();
-                if (authMethod === 'NSURLAuthenticationMethodServerTrust') {
-                    var trust = ps.serverTrust();
-                    var cred = ObjC.classes.NSURLCredential.credentialForTrust_(trust);
-                    var handler = new ObjC.Block(args[4]);
-                    handler(0, cred); // UseCredential
-                    log('SSL', 'Challenge bypassed: ' + ps.host().toString(), C.c);
-                }
-            } catch (e) {}
-        };
+['SecTrustEvaluateAsync', 'SecTrustEvaluateAsyncWithError'].forEach(function (name) {
+    try {
+        var addr = Module.findExportByName('Security', name);
+        if (addr) Interceptor.attach(addr, { onEnter: function () {} });
+    } catch (e) {}
+});
 
-        // Hook URLSession:didReceiveChallenge:completionHandler:
-        var sessionDelegateClass = ObjC.classes.NSURLSession;
-        if (ObjC.classes.__NSCFURLSessionConnection) {
-            try {
-                Interceptor.attach(
-                    ObjC.classes.__NSCFURLSessionConnection['- _handleAuthChallenge:completionHandler:'].implementation, {
-                        onEnter: function (args) {
-                            try {
-                                var challenge = new ObjC.Object(args[2]);
-                                var ps = challenge.protectionSpace();
-                                if (ps.authenticationMethod().toString() === 'NSURLAuthenticationMethodServerTrust') {
-                                    var trust = ps.serverTrust();
-                                    var cred = ObjC.classes.NSURLCredential.credentialForTrust_(trust);
-                                    var handler = new ObjC.Block(args[3]);
-                                    handler(0, cred);
-                                }
-                            } catch (e) {}
+// 1c. NSURLSession challenge
+try {
+    if (ObjC.classes.__NSCFURLSessionConnection) {
+        Interceptor.attach(
+            ObjC.classes.__NSCFURLSessionConnection['- _handleAuthChallenge:completionHandler:'].implementation, {
+                onEnter: function (args) {
+                    try {
+                        var challenge = new ObjC.Object(args[2]);
+                        var ps = challenge.protectionSpace();
+                        if (ps.authenticationMethod().toString() === 'NSURLAuthenticationMethodServerTrust') {
+                            var trust = ps.serverTrust();
+                            var cred = ObjC.classes.NSURLCredential.credentialForTrust_(trust);
+                            var handler = new ObjC.Block(args[3]);
+                            handler(0, cred);
                         }
-                    }
-                );
-                log('SSL', '__NSCFURLSessionConnection auth challenge → bypassed', C.g);
-            } catch (e) {}
-        }
+                    } catch (e) {}
+                }
+            }
+        );
+        log('SSL', 'NSURLSession auth challenge → bypassed', C.g);
     }
 } catch (e) {}
 
-// 1e. AFNetworking
+// 1d. AFNetworking
 try {
     if (ObjC.classes.AFSecurityPolicy) {
         Interceptor.attach(ObjC.classes.AFSecurityPolicy['- setSSLPinningMode:'].implementation, {
@@ -156,7 +123,7 @@ try {
     }
 } catch (e) {}
 
-// 1f. TrustKit
+// 1e. TrustKit
 try {
     if (ObjC.classes.TSKPinningValidator) {
         Interceptor.attach(ObjC.classes.TSKPinningValidator['- evaluateTrust:forHostname:'].implementation, {
@@ -166,14 +133,12 @@ try {
     }
 } catch (e) {}
 
-// 1g. Alamofire ServerTrustManager
+// 1f. Alamofire
 try {
-    var alamofireClasses = ['ServerTrustManager', 'Alamofire.ServerTrustManager'];
-    alamofireClasses.forEach(function (cls) {
+    ['ServerTrustManager', 'Alamofire.ServerTrustManager'].forEach(function (cls) {
         if (ObjC.classes[cls]) {
-            var methods = ObjC.classes[cls].$ownMethods;
-            methods.forEach(function (m) {
-                if (m.indexOf('serverTrustEvaluator') !== -1 || m.indexOf('evaluate') !== -1) {
+            ObjC.classes[cls].$ownMethods.forEach(function (m) {
+                if (m.indexOf('evaluate') !== -1) {
                     try {
                         Interceptor.attach(ObjC.classes[cls][m].implementation, {
                             onLeave: function (retval) { retval.replace(ptr(0x1)); }
@@ -181,16 +146,16 @@ try {
                     } catch (e) {}
                 }
             });
-            log('SSL', 'Alamofire ' + cls + ' → bypassed', C.g);
+            log('SSL', cls + ' → bypassed', C.g);
         }
     });
 } catch (e) {}
 
-log('SSL', '✓ All SSL bypass techniques loaded', C.g);
+log('SSL', '✓ All SSL bypass loaded', C.g);
 
 
 // ==========================================
-// 2. JAILBREAK DETECTION BYPASS (FULL)
+// 2. JAILBREAK DETECTION BYPASS
 // ==========================================
 banner('JAILBREAK DETECTION BYPASS');
 
@@ -198,8 +163,7 @@ var jbPaths = [
     '/Applications/Cydia.app', '/Applications/Sileo.app', '/Applications/Zebra.app',
     '/Applications/Filza.app', '/Applications/Activator.app', '/Applications/blackra1n.app',
     '/Applications/FakeCarrier.app', '/Applications/Icy.app', '/Applications/IntelliScreen.app',
-    '/Applications/MxTube.app', '/Applications/RockApp.app', '/Applications/SBSettings.app',
-    '/Applications/WinterBoard.app', '/Applications/Dopamine.app',
+    '/Applications/SBSettings.app', '/Applications/WinterBoard.app', '/Applications/Dopamine.app',
     '/usr/sbin/sshd', '/usr/bin/ssh', '/usr/libexec/sftp-server', '/usr/libexec/ssh-keysign',
     '/bin/bash', '/bin/sh', '/usr/bin/sshd',
     '/etc/apt', '/etc/apt/sources.list.d',
@@ -225,27 +189,16 @@ var jbPaths = [
     '/usr/lib/libcycript.dylib', '/usr/lib/frida', '/usr/local/bin/cycript',
     '/private/var/containers/Bundle/tweaksupport',
     '/var/mobile/Library/Preferences/com.saurik.Cydia.plist',
-    '/private/etc/dpkg/origins/debian',
-    '/Library/dpkg/info',
+    '/private/etc/dpkg/origins/debian', '/Library/dpkg/info',
     '/var/mobile/Library/Caches/com.saurik.Cydia',
 ];
 
-var jbSchemes = ['cydia', 'sileo', 'zbra', 'filza', 'undecimus', 'activator',
-    'postbox', 'icleaner', 'santander'];
+var jbSchemes = ['cydia', 'sileo', 'zbra', 'filza', 'undecimus', 'activator', 'icleaner', 'santander'];
 
-// 2a. NSFileManager - all file check methods
-var fmMethods = [
-    '- fileExistsAtPath:',
-    '- fileExistsAtPath:isDirectory:',
-    '- isReadableFileAtPath:',
-    '- isWritableFileAtPath:',
-    '- isExecutableFileAtPath:',
-    '- isDeletableFileAtPath:',
-    '- attributesOfItemAtPath:error:',
-    '- contentsAtPath:',
-];
-
-fmMethods.forEach(function (method) {
+// 2a. NSFileManager
+['- fileExistsAtPath:', '- fileExistsAtPath:isDirectory:', '- isReadableFileAtPath:',
+ '- isWritableFileAtPath:', '- isExecutableFileAtPath:', '- isDeletableFileAtPath:',
+ '- attributesOfItemAtPath:error:', '- contentsAtPath:'].forEach(function (method) {
     try {
         Interceptor.attach(ObjC.classes.NSFileManager[method].implementation, {
             onEnter: function (args) {
@@ -255,16 +208,14 @@ fmMethods.forEach(function (method) {
                 } catch (e) { this.block = false; }
             },
             onLeave: function (retval) {
-                if (this.block) {
-                    retval.replace(ptr(0x0));
-                }
+                if (this.block) retval.replace(ptr(0x0));
             }
         });
     } catch (e) {}
 });
-log('JB', 'NSFileManager (' + fmMethods.length + ' methods) → bypassed', C.g);
+log('JB', 'NSFileManager → bypassed', C.g);
 
-// 2b. C-level file access functions
+// 2b. C-level file functions
 ['access', 'stat', 'stat64', 'lstat', 'lstat64', 'fopen', 'opendir', 'readlink',
  'realpath', 'realpath$DARWIN_EXTSN'].forEach(function (fname) {
     try {
@@ -288,23 +239,9 @@ log('JB', 'NSFileManager (' + fmMethods.length + ' methods) → bypassed', C.g);
         });
     } catch (e) {}
 });
-log('JB', 'C-level file functions → bypassed', C.g);
+log('JB', 'C-level file checks → bypassed', C.g);
 
-// 2c. NSString pathExists / stringByResolvingSymlinks
-try {
-    Interceptor.attach(ObjC.classes.NSString['- stringByResolvingSymlinksInPath'].implementation, {
-        onLeave: function (retval) {
-            try {
-                var resolved = new ObjC.Object(retval).toString();
-                if (jbPaths.some(function (p) { return resolved.indexOf(p) !== -1; })) {
-                    retval.replace(ObjC.classes.NSString.stringWithString_('/nonexistent'));
-                }
-            } catch (e) {}
-        }
-    });
-} catch (e) {}
-
-// 2d. canOpenURL
+// 2c. canOpenURL
 try {
     Interceptor.attach(ObjC.classes.UIApplication['- canOpenURL:'].implementation, {
         onEnter: function (args) {
@@ -319,35 +256,25 @@ try {
     });
 } catch (e) {}
 
-// 2e. fork / popen / system
+// 2d. fork / popen / system
 ['fork', 'popen', 'system'].forEach(function (fname) {
     try {
         var func = Module.findExportByName(null, fname);
-        if (func) {
-            Interceptor.attach(func, {
-                onLeave: function (retval) {
-                    retval.replace(ptr(-1));
-                }
-            });
-        }
+        if (func) Interceptor.attach(func, { onLeave: function (retval) { retval.replace(ptr(-1)); } });
     } catch (e) {}
 });
-log('JB', 'fork/popen/system → blocked', C.g);
 
-// 2f. sandbox_check - writing to /private
+// 2e. sandbox_check
 try {
     var sandboxCheck = Module.findExportByName(null, 'sandbox_check');
     if (sandboxCheck) {
         Interceptor.attach(sandboxCheck, {
-            onLeave: function (retval) {
-                retval.replace(ptr(0x0)); // allowed
-            }
+            onLeave: function (retval) { retval.replace(ptr(0x0)); }
         });
-        log('JB', 'sandbox_check → bypassed', C.g);
     }
 } catch (e) {}
 
-// 2g. dyld image enumeration - hide injected libs
+// 2f. dyld — hide injected libs
 try {
     var _dyld_get_image_name = Module.findExportByName(null, '_dyld_get_image_name');
     if (_dyld_get_image_name) {
@@ -365,21 +292,17 @@ try {
                 } catch (e) {}
             }
         });
-        log('JB', '_dyld_get_image_name → filtered', C.g);
     }
 } catch (e) {}
 
-// 2h. sysctl P_TRACED + anti-debug
+// 2g. sysctl P_TRACED
 try {
     var sysctl = Module.findExportByName(null, 'sysctl');
     if (sysctl) {
         Interceptor.attach(sysctl, {
             onEnter: function (args) {
                 var mib = args[0];
-                var mib0 = mib.readS32();
-                var mib1 = mib.add(4).readS32();
-                var mib2 = mib.add(8).readS32();
-                if (mib0 === 1 && mib1 === 14 && mib2 === 1) {
+                if (mib.readS32() === 1 && mib.add(4).readS32() === 14 && mib.add(8).readS32() === 1) {
                     this.isDebugCheck = true;
                     this.outBuf = args[2];
                 }
@@ -388,32 +311,27 @@ try {
                 if (this.isDebugCheck && this.outBuf && !this.outBuf.isNull()) {
                     try {
                         var flags = this.outBuf.add(32).readU32();
-                        flags &= ~0x800;
-                        this.outBuf.add(32).writeU32(flags);
+                        this.outBuf.add(32).writeU32(flags & ~0x800);
                     } catch (e) {}
                 }
             }
         });
-        log('JB', 'sysctl P_TRACED → cleared', C.g);
     }
 } catch (e) {}
 
-// 2i. ptrace anti-debug
+// 2h. ptrace PT_DENY_ATTACH
 try {
     var ptrace = Module.findExportByName(null, 'ptrace');
     if (ptrace) {
         Interceptor.attach(ptrace, {
             onEnter: function (args) {
-                if (args[0].toInt32() === 31) { // PT_DENY_ATTACH
-                    args[0] = ptr(0);
-                    log('JB', 'ptrace PT_DENY_ATTACH → blocked', C.y);
-                }
+                if (args[0].toInt32() === 31) args[0] = ptr(0);
             }
         });
     }
 } catch (e) {}
 
-// 2j. getenv
+// 2i. getenv + NSProcessInfo
 try {
     var getenv = Module.findExportByName(null, 'getenv');
     if (getenv) {
@@ -424,69 +342,71 @@ try {
                 try { this.key = args[0].readUtf8String(); } catch (e) { this.key = null; }
             },
             onLeave: function (retval) {
-                if (this.key && blockedEnvs.indexOf(this.key) !== -1) {
-                    retval.replace(ptr(0x0));
-                }
+                if (this.key && blockedEnvs.indexOf(this.key) !== -1) retval.replace(ptr(0x0));
             }
         });
-        log('JB', 'getenv DYLD_* → hidden', C.g);
     }
 } catch (e) {}
 
-// 2k. NSProcessInfo environment
 try {
     Interceptor.attach(ObjC.classes.NSProcessInfo['- environment'].implementation, {
         onLeave: function (retval) {
             try {
-                var env = new ObjC.Object(retval);
-                var mutableEnv = env.mutableCopy();
-                ['DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', '_MSSafeMode'].forEach(function (key) {
-                    mutableEnv.removeObjectForKey_(key);
+                var env = new ObjC.Object(retval).mutableCopy();
+                ['DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', '_MSSafeMode'].forEach(function (k) {
+                    env.removeObjectForKey_(k);
                 });
-                retval.replace(mutableEnv);
+                retval.replace(env);
             } catch (e) {}
         }
     });
-    log('JB', 'NSProcessInfo environment → cleaned', C.g);
 } catch (e) {}
 
-log('JB', '✓ All Jailbreak bypass techniques loaded', C.g);
+// 2j. NSString resolving symlinks
+try {
+    Interceptor.attach(ObjC.classes.NSString['- stringByResolvingSymlinksInPath'].implementation, {
+        onLeave: function (retval) {
+            try {
+                var resolved = new ObjC.Object(retval).toString();
+                if (jbPaths.some(function (p) { return resolved.indexOf(p) !== -1; })) {
+                    retval.replace(ObjC.classes.NSString.stringWithString_('/nonexistent'));
+                }
+            } catch (e) {}
+        }
+    });
+} catch (e) {}
+
+log('JB', '✓ All Jailbreak bypass loaded', C.g);
 
 
 // ==========================================
-// 3. FRIDA DETECTION BYPASS (ADVANCED)
+// 3. FRIDA DETECTION BYPASS
 // ==========================================
 banner('FRIDA DETECTION BYPASS');
 
-// 3a. Port scan blocking (27042, 27043)
+// 3a. Port blocking
 try {
     var connectFunc = Module.findExportByName(null, 'connect');
     if (connectFunc) {
         Interceptor.attach(connectFunc, {
             onEnter: function (args) {
                 var sa = args[1];
-                var family = sa.readU16();
-                if (family === 2) {
+                if (sa.readU16() === 2) {
                     var port = (sa.add(2).readU8() << 8) | sa.add(3).readU8();
-                    if (port === 27042 || port === 27043) {
-                        this.blockIt = true;
-                    }
+                    if (port === 27042 || port === 27043) this.blockIt = true;
                 }
             },
             onLeave: function (retval) {
-                if (this.blockIt) {
-                    retval.replace(ptr(-1));
-                }
+                if (this.blockIt) retval.replace(ptr(-1));
             }
         });
-        log('FRIDA', 'Port 27042/27043 → blocked', C.g);
     }
 } catch (e) {}
 
 // 3b. String searches
 try {
     var fridaStrings = ['frida', 'FRIDA', 'gum-js-loop', 'gmain', 'linjector',
-        'frida-agent', 'frida-server', 'frida-gadget', '/data/local/tmp'];
+        'frida-agent', 'frida-server', 'frida-gadget'];
     var strstr = Module.findExportByName(null, 'strstr');
     if (strstr) {
         Interceptor.attach(strstr, {
@@ -496,16 +416,13 @@ try {
             onLeave: function (retval) {
                 if (this.needle && fridaStrings.some(function (s) {
                     return this.needle.indexOf(s) !== -1;
-                }.bind(this))) {
-                    retval.replace(ptr(0x0));
-                }
+                }.bind(this))) retval.replace(ptr(0x0));
             }
         });
-        log('FRIDA', 'strstr Frida strings → hidden', C.g);
     }
 } catch (e) {}
 
-// 3c. strcmp for Frida thread names
+// 3c. strcmp
 try {
     var strcmp = Module.findExportByName(null, 'strcmp');
     if (strcmp) {
@@ -521,26 +438,13 @@ try {
                 } catch (e) {}
             },
             onLeave: function (retval) {
-                if (this.fake) retval.replace(ptr(-1)); // not equal
-            }
-        });
-        log('FRIDA', 'strcmp Frida thread check → hidden', C.g);
-    }
-} catch (e) {}
-
-// 3d. /proc/self/maps (task_info on iOS)
-try {
-    var task_info = Module.findExportByName(null, 'task_info');
-    if (task_info) {
-        Interceptor.attach(task_info, {
-            onLeave: function (retval) {
-                // don't tamper, just log
+                if (this.fake) retval.replace(ptr(-1));
             }
         });
     }
 } catch (e) {}
 
-// 3e. dlopen/dlsym checks for Frida
+// 3d. dlopen
 try {
     var dlopen = Module.findExportByName(null, 'dlopen');
     if (dlopen) {
@@ -550,16 +454,14 @@ try {
                     var path = args[0].readUtf8String();
                     if (path && (path.indexOf('frida') !== -1 || path.indexOf('FridaGadget') !== -1)) {
                         args[0] = Memory.allocUtf8String('/nonexistent');
-                        log('FRIDA', 'Blocked dlopen: ' + path, C.y);
                     }
                 } catch (e) {}
             }
         });
-        log('FRIDA', 'dlopen Frida lib → blocked', C.g);
     }
 } catch (e) {}
 
-// 3f. Named pipe / socket detection
+// 3e. Named pipe
 try {
     var openFunc = Module.findExportByName(null, 'open');
     if (openFunc) {
@@ -582,114 +484,169 @@ log('FRIDA', '✓ All Frida detection bypass loaded', C.g);
 // ==========================================
 // 4. SCREENSHOT / SCREEN RECORDING BYPASS
 // ==========================================
-banner('SCREENSHOT/RECORDING BYPASS');
+banner('SCREENSHOT BYPASS');
 
-// 4a. UIScreen isCaptured
 try {
     Interceptor.attach(ObjC.classes.UIScreen['- isCaptured'].implementation, {
-        onLeave: function (retval) {
-            retval.replace(ptr(0x0)); // NO
-        }
+        onLeave: function (retval) { retval.replace(ptr(0x0)); }
     });
-    log('SCREEN', 'UIScreen isCaptured → false', C.g);
+    log('SCREEN', 'isCaptured → false', C.g);
 } catch (e) {}
 
-// 4b. Screenshot notification
 try {
-    var notifCenter = ObjC.classes.NSNotificationCenter;
-    Interceptor.attach(notifCenter['- addObserver:selector:name:object:'].implementation, {
+    Interceptor.attach(ObjC.classes.NSNotificationCenter['- addObserver:selector:name:object:'].implementation, {
         onEnter: function (args) {
             try {
                 var name = new ObjC.Object(args[4]).toString();
                 if (name.indexOf('Screenshot') !== -1 || name.indexOf('CapturedDidChange') !== -1) {
                     args[4] = ObjC.classes.NSString.stringWithString_('__blocked__');
-                    log('SCREEN', 'Blocked screenshot notification: ' + name, C.y);
+                    log('SCREEN', 'Blocked notification: ' + name, C.y);
                 }
             } catch (e) {}
         }
     });
-    log('SCREEN', 'Screenshot notifications → blocked', C.g);
 } catch (e) {}
 
-log('SCREEN', '✓ Screen capture bypass loaded', C.g);
+log('SCREEN', '✓ Screen bypass loaded', C.g);
 
 
 // ==========================================
-// 5. NETWORK / API MONITORING (ENHANCED)
+// 5. NETWORK / API DEEP MONITORING
 // ==========================================
-banner('NETWORK MONITORING');
+banner('NETWORK MONITORING (ENHANCED)');
 
-// 5a. NSURLSession - all request methods
+// === TARGETED DOMAINS ===
+var targetDomains = [
+    'api.kie.ai',
+    'api.pikapikapika.io',
+    'api.useapi.net',
+    'api.ai-auto.io',
+    'media.pixverse.ai',
+    'us-central1-ai-video-65e40.cloudfunctions.net',
+    'checkvideostatus-jpktk6ub7a-uc.a.run.app',
+    'tztdq0ux1l.execute-api.us-east-1.amazonaws.com',
+    'firestore.googleapis.com',
+    'securetoken.googleapis.com',
+    'identitytoolkit.googleapis.com',
+    'vision.googleapis.com',
+];
+
+function isTargetURL(url) {
+    if (!url) return false;
+    return targetDomains.some(function (d) { return url.indexOf(d) !== -1; });
+}
+
+function isLimitRelated(text) {
+    if (!text) return false;
+    var t = text.toLowerCase();
+    return t.indexOf('limit') !== -1 || t.indexOf('quota') !== -1 ||
+           t.indexOf('exceeded') !== -1 || t.indexOf('remaining') !== -1 ||
+           t.indexOf('left') !== -1 || t.indexOf('premium') !== -1 ||
+           t.indexOf('subscribe') !== -1 || t.indexOf('grok') !== -1 ||
+           t.indexOf('gemini') !== -1 || t.indexOf('seedance') !== -1 ||
+           t.indexOf('daily') !== -1 || t.indexOf('trial') !== -1 ||
+           t.indexOf('plan') !== -1 || t.indexOf('credits') !== -1 ||
+           t.indexOf('free') !== -1 || t.indexOf('pro') !== -1;
+}
+
+// 5a. NSURLSession — all request types
 try {
-    var sessionMethods = [
-        '- dataTaskWithRequest:completionHandler:',
-        '- dataTaskWithRequest:',
-        '- dataTaskWithURL:completionHandler:',
-        '- uploadTaskWithRequest:fromData:completionHandler:',
-        '- downloadTaskWithRequest:completionHandler:',
-    ];
-    sessionMethods.forEach(function (method) {
+    ['- dataTaskWithRequest:completionHandler:',
+     '- dataTaskWithRequest:',
+     '- dataTaskWithURL:completionHandler:',
+     '- uploadTaskWithRequest:fromData:completionHandler:',
+     '- downloadTaskWithRequest:completionHandler:',
+    ].forEach(function (method) {
         try {
             Interceptor.attach(ObjC.classes.NSURLSession[method].implementation, {
                 onEnter: function (args) {
                     try {
                         var obj = new ObjC.Object(args[2]);
-                        var url;
-                        if (obj.$className === 'NSURL' || obj.$className === '__NSCFConstantString' || obj.$className === '__NSCFString') {
+                        var url, httpMethod;
+
+                        if (obj.$className.indexOf('URL') !== -1 && obj.$className.indexOf('Request') === -1) {
                             url = obj.toString();
+                            httpMethod = 'GET';
                         } else {
                             url = obj.URL().absoluteString().toString();
-                            var httpMethod = obj.HTTPMethod().toString();
-                            log('NET', '→ ' + httpMethod + ' ' + url, C.b);
+                            httpMethod = obj.HTTPMethod().toString();
+                        }
 
-                            // Print auth headers
-                            var headers = obj.allHTTPHeaderFields();
-                            if (headers) {
-                                var keys = headers.allKeys();
-                                for (var i = 0; i < keys.count(); i++) {
-                                    var key = keys.objectAtIndex_(i).toString();
-                                    var kl = key.toLowerCase();
-                                    if (kl.indexOf('auth') !== -1 || kl.indexOf('token') !== -1 ||
-                                        kl.indexOf('api') !== -1 || kl.indexOf('key') !== -1 ||
-                                        kl.indexOf('bearer') !== -1 || kl.indexOf('cookie') !== -1) {
+                        var isTarget = isTargetURL(url);
+                        var color = isTarget ? C.m : C.b;
+                        var prefix = isTarget ? '★ ' : '';
+
+                        log('NET', prefix + '→ ' + httpMethod + ' ' + url, color);
+
+                        // Headers (always for target, auth-only for others)
+                        if (obj.allHTTPHeaderFields) {
+                            try {
+                                var headers = obj.allHTTPHeaderFields();
+                                if (headers) {
+                                    var keys = headers.allKeys();
+                                    for (var i = 0; i < keys.count(); i++) {
+                                        var key = keys.objectAtIndex_(i).toString();
                                         var val = headers.objectForKey_(keys.objectAtIndex_(i)).toString();
-                                        log('NET', '  ⤷ ' + key + ': ' + val.substring(0, 120), C.m);
+                                        var kl = key.toLowerCase();
+                                        if (isTarget || kl.indexOf('auth') !== -1 || kl.indexOf('token') !== -1 ||
+                                            kl.indexOf('api') !== -1 || kl.indexOf('bearer') !== -1 ||
+                                            kl.indexOf('cookie') !== -1 || kl.indexOf('key') !== -1) {
+                                            log('NET', '  ⤷ ' + key + ': ' + val.substring(0, 150), C.c);
+                                        }
                                     }
                                 }
-                            }
+                            } catch (e) {}
+                        }
 
-                            // Print body
-                            var body = obj.HTTPBody();
-                            if (body && !body.isNull()) {
-                                try {
+                        // Body
+                        if (obj.HTTPBody) {
+                            try {
+                                var body = obj.HTTPBody();
+                                if (body && !body.isNull()) {
                                     var bodyStr = ObjC.classes.NSString.alloc().initWithData_encoding_(body, 4).toString();
                                     if (bodyStr.length > 0) {
-                                        log('NET', '  ⤷ Body: ' + bodyStr.substring(0, 300), C.c);
+                                        log('NET', '  ⤷ Body: ' + bodyStr.substring(0, 500), C.c);
+
+                                        // Kie AI specific
+                                        if (url.indexOf('kie.ai') !== -1) {
+                                            log('NET', '  ⤷ [KIE.AI] Full request body:', C.m);
+                                            log('NET', '    ' + bodyStr, C.m);
+                                        }
                                     }
-                                } catch (e) {}
-                            }
-                            return;
+                                }
+                            } catch (e) {}
                         }
-                        log('NET', '→ GET ' + url, C.b);
                     } catch (e) {}
                 }
             });
         } catch (e) {}
     });
-    log('NET', 'NSURLSession hooks loaded', C.g);
+    log('NET', 'Request monitoring loaded', C.g);
 } catch (e) {}
 
-// 5b. Response monitoring
+// 5b. Response monitoring with body capture
 try {
     Interceptor.attach(ObjC.classes.NSHTTPURLResponse['- initWithURL:statusCode:HTTPVersion:headerFields:'].implementation, {
         onEnter: function (args) {
             try {
                 var url = new ObjC.Object(args[2]).toString();
                 var statusCode = args[3].toInt32();
+                var isTarget = isTargetURL(url);
+
                 if (statusCode >= 400) {
                     log('NET', '← ERROR ' + statusCode + ' ' + url, C.r);
-                } else {
-                    log('NET', '← ' + statusCode + ' ' + url, C.g);
+                } else if (isTarget) {
+                    log('NET', '★ ← ' + statusCode + ' ' + url, C.m);
+                }
+
+                // Log response headers for target domains
+                if (isTarget) {
+                    try {
+                        var respHeaders = new ObjC.Object(args[5]);
+                        if (respHeaders && !respHeaders.isNull()) {
+                            log('NET', '  ⤷ Response headers: ' + respHeaders.toString().substring(0, 300), C.c);
+                        }
+                    } catch (e) {}
                 }
             } catch (e) {}
         }
@@ -697,29 +654,91 @@ try {
     log('NET', 'Response monitoring loaded', C.g);
 } catch (e) {}
 
-log('NET', '✓ Network monitoring loaded', C.g);
+// 5c. NSJSONSerialization — capture ALL JSON parsing (catches API responses)
+try {
+    Interceptor.attach(ObjC.classes.NSJSONSerialization['+ JSONObjectWithData:options:error:'].implementation, {
+        onEnter: function (args) {
+            try {
+                var data = new ObjC.Object(args[2]);
+                var str = ObjC.classes.NSString.alloc().initWithData_encoding_(data, 4);
+                if (str) {
+                    var s = str.toString();
+                    if (isLimitRelated(s)) {
+                        log('JSON', '⚡ LIMIT/QUOTA response detected:', C.br);
+                        log('JSON', '  ' + s.substring(0, 800), C.r);
+                    }
+
+                    // Kie AI responses
+                    if (s.indexOf('kie.ai') !== -1 || s.indexOf('createTask') !== -1 ||
+                        s.indexOf('recordInfo') !== -1 || s.indexOf('taskId') !== -1) {
+                        log('JSON', '★ [KIE.AI] Response:', C.m);
+                        log('JSON', '  ' + s.substring(0, 800), C.m);
+                    }
+
+                    // Grok / Gemini / Seedance responses
+                    if (s.indexOf('grok') !== -1 || s.indexOf('Grok') !== -1) {
+                        log('JSON', '★ [GROK] Response:', C.y);
+                        log('JSON', '  ' + s.substring(0, 800), C.y);
+                    }
+                    if (s.indexOf('gemini') !== -1 || s.indexOf('Gemini') !== -1) {
+                        log('JSON', '★ [GEMINI] Response:', C.y);
+                        log('JSON', '  ' + s.substring(0, 800), C.y);
+                    }
+                    if (s.indexOf('seedance') !== -1 || s.indexOf('Seedance') !== -1) {
+                        log('JSON', '★ [SEEDANCE] Response:', C.y);
+                        log('JSON', '  ' + s.substring(0, 800), C.y);
+                    }
+
+                    // Pika responses
+                    if (s.indexOf('pika') !== -1 || s.indexOf('Pika') !== -1) {
+                        log('JSON', '★ [PIKA] Response:', C.c);
+                        log('JSON', '  ' + s.substring(0, 800), C.c);
+                    }
+
+                    // PixVerse responses
+                    if (s.indexOf('pixverse') !== -1 || s.indexOf('PixVerse') !== -1) {
+                        log('JSON', '★ [PIXVERSE] Response:', C.c);
+                        log('JSON', '  ' + s.substring(0, 800), C.c);
+                    }
+
+                    // Subscription/purchase related
+                    if (s.indexOf('subscription') !== -1 || s.indexOf('purchase') !== -1 ||
+                        s.indexOf('entitlement') !== -1 || s.indexOf('receipt') !== -1) {
+                        log('JSON', '💰 [PURCHASE] Response:', C.y);
+                        log('JSON', '  ' + s.substring(0, 800), C.y);
+                    }
+                }
+            } catch (e) {}
+        }
+    });
+    log('NET', 'JSON response interceptor loaded (catches limits/quotas)', C.g);
+} catch (e) {}
+
+log('NET', '✓ Enhanced network monitoring loaded', C.g);
 
 
 // ==========================================
-// 6. STOREKIT / IAP MONITORING
+// 6. STOREKIT MONITORING (ADAPTED FOR NEW VERSION)
 // ==========================================
-banner('STOREKIT MONITORING');
+banner('STOREKIT MONITORING (v3 — adapted)');
 
-// 6a. SKPaymentQueue
+// Note: StoreKit2 symbols (Product.purchase, Transaction.finish, AppStore.sync)
+// were REMOVED in the new version. Focus on StoreKit1 + server-side.
+
+// 6a. SKPaymentQueue (StoreKit1 — still present)
 try {
     Interceptor.attach(ObjC.classes.SKPaymentQueue['- addPayment:'].implementation, {
         onEnter: function (args) {
             try {
                 var payment = new ObjC.Object(args[2]);
                 var productId = payment.productIdentifier().toString();
-                var qty = payment.quantity();
-                log('IAP', '💰 Purchase: ' + productId + ' (qty: ' + qty + ')', C.m);
+                log('IAP', '💰 Purchase: ' + productId, C.m);
             } catch (e) {}
         }
     });
 } catch (e) {}
 
-// 6b. SKPaymentTransaction states
+// 6b. SKPaymentTransaction
 try {
     Interceptor.attach(ObjC.classes.SKPaymentTransaction['- transactionState'].implementation, {
         onLeave: function (retval) {
@@ -738,7 +757,7 @@ try {
     });
 } catch (e) {}
 
-// 6c. SKProduct price monitoring
+// 6c. SKProduct price
 try {
     Interceptor.attach(ObjC.classes.SKProduct['- price'].implementation, {
         onLeave: function (retval) {
@@ -746,13 +765,22 @@ try {
                 var product = new ObjC.Object(this.context.x0 || this.context.r0);
                 var pid = product.productIdentifier().toString();
                 var price = new ObjC.Object(retval).toString();
-                log('IAP', '  📦 Product: ' + pid + ' = ' + price, C.c);
+                log('IAP', '  📦 ' + pid + ' = $' + price, C.c);
             } catch (e) {}
         }
     });
 } catch (e) {}
 
-// 6d. AI_Video_Maker StoreKit classes - hook ALL methods
+// 6d. Receipt URL access
+try {
+    Interceptor.attach(ObjC.classes.NSBundle['- appStoreReceiptURL'].implementation, {
+        onLeave: function (retval) {
+            try { log('IAP', '📄 Receipt URL: ' + new ObjC.Object(retval).toString(), C.y); } catch (e) {}
+        }
+    });
+} catch (e) {}
+
+// 6e. AI_Video_Maker StoreKit classes
 try {
     ['AI_Video_Maker.StoreKitManager', 'AI_Video_Maker.StoreKit2Manager'].forEach(function (cls) {
         if (ObjC.classes[cls]) {
@@ -766,8 +794,7 @@ try {
                         onLeave: function (retval) {
                             if (!retval.isNull()) {
                                 try {
-                                    var obj = new ObjC.Object(retval);
-                                    log('IAP', '  ↩ return: ' + obj.toString().substring(0, 150), C.c);
+                                    log('IAP', '  ↩ ' + new ObjC.Object(retval).toString().substring(0, 200), C.c);
                                 } catch (e) {}
                             }
                         }
@@ -775,17 +802,8 @@ try {
                 } catch (e) {}
             });
             log('IAP', cls + ' → ' + methods.length + ' methods hooked', C.g);
-        }
-    });
-} catch (e) {}
-
-// 6e. Receipt validation
-try {
-    Interceptor.attach(ObjC.classes.NSBundle['- appStoreReceiptURL'].implementation, {
-        onLeave: function (retval) {
-            try {
-                log('IAP', '📄 Receipt URL accessed: ' + new ObjC.Object(retval).toString(), C.y);
-            } catch (e) {}
+        } else {
+            log('IAP', cls + ' NOT FOUND (may be removed in new version)', C.y);
         }
     });
 } catch (e) {}
@@ -794,91 +812,87 @@ log('IAP', '✓ StoreKit monitoring loaded', C.g);
 
 
 // ==========================================
-// 7. USERDEFAULTS MONITORING
+// 7. USERDEFAULTS MONITORING (FOCUSED)
 // ==========================================
 banner('USERDEFAULTS MONITORING');
 
+var udKeys = ['premium', 'pro', 'subscription', 'purchased', 'paid', 'trial',
+    'expire', 'entitle', 'unlock', 'vip', 'coins', 'credits', 'token',
+    'limit', 'count', 'ads', 'ad_free', 'remove_ads', 'grok', 'gemini',
+    'seedance', 'pika', 'pixverse', 'kie', 'daily', 'free', 'quota',
+    'remaining', 'video', 'generation', 'plan'];
+
+function isUDInteresting(key) {
+    if (!key) return false;
+    var kl = key.toLowerCase();
+    return udKeys.some(function (ik) { return kl.indexOf(ik) !== -1; });
+}
+
 try {
-    var interestingKeys = ['premium', 'pro', 'subscription', 'purchased', 'paid', 'trial',
-        'expire', 'entitle', 'unlock', 'vip', 'coins', 'credits', 'token',
-        'limit', 'count', 'ads', 'ad_free', 'remove_ads'];
-
-    // setObject:forKey:
-    Interceptor.attach(ObjC.classes.NSUserDefaults['- setObject:forKey:'].implementation, {
-        onEnter: function (args) {
-            try {
-                var key = new ObjC.Object(args[3]).toString();
-                var val = new ObjC.Object(args[2]).toString();
-                var kl = key.toLowerCase();
-                if (interestingKeys.some(function (ik) { return kl.indexOf(ik) !== -1; })) {
-                    log('UD', '✏️  SET ' + key + ' = ' + val.substring(0, 100), C.y);
+    // Writes
+    [['- setObject:forKey:', function (args) {
+        var key = new ObjC.Object(args[3]).toString();
+        var val = new ObjC.Object(args[2]).toString();
+        return [key, val];
+    }],
+    ['- setBool:forKey:', function (args) {
+        var key = new ObjC.Object(args[3]).toString();
+        var val = args[2].toInt32() ? 'YES' : 'NO';
+        return [key, val];
+    }],
+    ['- setInteger:forKey:', function (args) {
+        var key = new ObjC.Object(args[3]).toString();
+        var val = args[2].toInt32().toString();
+        return [key, val];
+    }],
+    ['- setDouble:forKey:', function (args) {
+        var key = new ObjC.Object(args[3]).toString();
+        return [key, '(double)'];
+    }],
+    ['- setFloat:forKey:', function (args) {
+        var key = new ObjC.Object(args[3]).toString();
+        return [key, '(float)'];
+    }]].forEach(function (pair) {
+        try {
+            Interceptor.attach(ObjC.classes.NSUserDefaults[pair[0]].implementation, {
+                onEnter: function (args) {
+                    try {
+                        var result = pair[1](args);
+                        if (isUDInteresting(result[0])) {
+                            log('UD', '✏️  SET ' + result[0] + ' = ' + result[1].substring(0, 150), C.y);
+                        }
+                    } catch (e) {}
                 }
-            } catch (e) {}
-        }
+            });
+        } catch (e) {}
     });
 
-    // setBool:forKey:
-    Interceptor.attach(ObjC.classes.NSUserDefaults['- setBool:forKey:'].implementation, {
-        onEnter: function (args) {
-            try {
-                var key = new ObjC.Object(args[3]).toString();
-                var val = args[2].toInt32() ? 'YES' : 'NO';
-                var kl = key.toLowerCase();
-                if (interestingKeys.some(function (ik) { return kl.indexOf(ik) !== -1; })) {
-                    log('UD', '✏️  SET (bool) ' + key + ' = ' + val, C.y);
+    // Reads
+    [['- objectForKey:', true],
+     ['- boolForKey:', false],
+     ['- integerForKey:', false],
+     ['- stringForKey:', true],
+     ['- doubleForKey:', false]].forEach(function (pair) {
+        try {
+            Interceptor.attach(ObjC.classes.NSUserDefaults[pair[0]].implementation, {
+                onEnter: function (args) {
+                    try {
+                        this.key = new ObjC.Object(args[2]).toString();
+                        this.track = isUDInteresting(this.key);
+                    } catch (e) { this.track = false; }
+                },
+                onLeave: function (retval) {
+                    if (this.track) {
+                        try {
+                            var val = pair[1] && !retval.isNull()
+                                ? new ObjC.Object(retval).toString().substring(0, 150)
+                                : retval.toInt32().toString();
+                            log('UD', '📖 GET ' + this.key + ' = ' + val, C.c);
+                        } catch (e) {}
+                    }
                 }
-            } catch (e) {}
-        }
-    });
-
-    // setInteger:forKey:
-    Interceptor.attach(ObjC.classes.NSUserDefaults['- setInteger:forKey:'].implementation, {
-        onEnter: function (args) {
-            try {
-                var key = new ObjC.Object(args[3]).toString();
-                var val = args[2].toInt32();
-                var kl = key.toLowerCase();
-                if (interestingKeys.some(function (ik) { return kl.indexOf(ik) !== -1; })) {
-                    log('UD', '✏️  SET (int) ' + key + ' = ' + val, C.y);
-                }
-            } catch (e) {}
-        }
-    });
-
-    // objectForKey: reads
-    Interceptor.attach(ObjC.classes.NSUserDefaults['- objectForKey:'].implementation, {
-        onEnter: function (args) {
-            try {
-                this.key = new ObjC.Object(args[2]).toString();
-                this.track = interestingKeys.some(function (ik) {
-                    return this.key.toLowerCase().indexOf(ik) !== -1;
-                }.bind(this));
-            } catch (e) { this.track = false; }
-        },
-        onLeave: function (retval) {
-            if (this.track && !retval.isNull()) {
-                try {
-                    log('UD', '📖 GET ' + this.key + ' = ' + new ObjC.Object(retval).toString().substring(0, 100), C.c);
-                } catch (e) {}
-            }
-        }
-    });
-
-    // boolForKey: reads
-    Interceptor.attach(ObjC.classes.NSUserDefaults['- boolForKey:'].implementation, {
-        onEnter: function (args) {
-            try {
-                this.key = new ObjC.Object(args[2]).toString();
-                this.track = interestingKeys.some(function (ik) {
-                    return this.key.toLowerCase().indexOf(ik) !== -1;
-                }.bind(this));
-            } catch (e) { this.track = false; }
-        },
-        onLeave: function (retval) {
-            if (this.track) {
-                log('UD', '📖 GET (bool) ' + this.key + ' = ' + (retval.toInt32() ? 'YES' : 'NO'), C.c);
-            }
-        }
+            });
+        } catch (e) {}
     });
 
     log('UD', '✓ UserDefaults monitoring loaded', C.g);
@@ -891,64 +905,39 @@ try {
 banner('KEYCHAIN MONITORING');
 
 try {
-    var SecItemCopyMatching = Module.findExportByName('Security', 'SecItemCopyMatching');
-    var SecItemAdd = Module.findExportByName('Security', 'SecItemAdd');
-    var SecItemUpdate = Module.findExportByName('Security', 'SecItemUpdate');
-    var SecItemDelete = Module.findExportByName('Security', 'SecItemDelete');
+    var kcFuncs = {
+        'SecItemCopyMatching': ['🔑 READ', C.c],
+        'SecItemAdd': ['➕ ADD', C.y],
+        'SecItemUpdate': ['✏️  UPDATE', C.y],
+        'SecItemDelete': ['🗑  DELETE', C.r],
+    };
 
-    if (SecItemCopyMatching) {
-        Interceptor.attach(SecItemCopyMatching, {
-            onEnter: function (args) {
-                try {
-                    var query = new ObjC.Object(args[0]);
-                    log('KC', '🔑 SecItemCopyMatching: ' + query.toString().substring(0, 200), C.c);
-                } catch (e) {}
+    Object.keys(kcFuncs).forEach(function (name) {
+        try {
+            var addr = Module.findExportByName('Security', name);
+            if (addr) {
+                Interceptor.attach(addr, {
+                    onEnter: function (args) {
+                        try {
+                            var query = new ObjC.Object(args[0]).toString();
+                            log('KC', kcFuncs[name][0] + ' ' + name + ': ' + query.substring(0, 250), kcFuncs[name][1]);
+                        } catch (e) {}
+                    }
+                });
             }
-        });
-    }
-
-    if (SecItemAdd) {
-        Interceptor.attach(SecItemAdd, {
-            onEnter: function (args) {
-                try {
-                    var attrs = new ObjC.Object(args[0]);
-                    log('KC', '➕ SecItemAdd: ' + attrs.toString().substring(0, 200), C.y);
-                } catch (e) {}
-            }
-        });
-    }
-
-    if (SecItemUpdate) {
-        Interceptor.attach(SecItemUpdate, {
-            onEnter: function (args) {
-                try {
-                    var query = new ObjC.Object(args[0]);
-                    log('KC', '✏️  SecItemUpdate: ' + query.toString().substring(0, 200), C.y);
-                } catch (e) {}
-            }
-        });
-    }
-
-    if (SecItemDelete) {
-        Interceptor.attach(SecItemDelete, {
-            onEnter: function (args) {
-                try {
-                    var query = new ObjC.Object(args[0]);
-                    log('KC', '🗑  SecItemDelete: ' + query.toString().substring(0, 200), C.r);
-                } catch (e) {}
-            }
-        });
-    }
+        } catch (e) {}
+    });
 
     log('KC', '✓ Keychain monitoring loaded', C.g);
 } catch (e) {}
 
 
 // ==========================================
-// 9. FIREBASE / ANALYTICS
+// 9. FIREBASE FIRESTORE DEEP MONITORING
 // ==========================================
-banner('FIREBASE MONITORING');
+banner('FIREBASE DEEP MONITORING');
 
+// 9a. Firestore collections/documents
 try {
     if (ObjC.classes.FIRFirestore) {
         ['- collectionWithPath:', '- documentWithPath:'].forEach(function (m) {
@@ -956,7 +945,8 @@ try {
                 Interceptor.attach(ObjC.classes.FIRFirestore[m].implementation, {
                     onEnter: function (args) {
                         try {
-                            log('FB', 'Firestore ' + m.split(':')[0].replace('- ', '') + ': ' + new ObjC.Object(args[2]).toString(), C.c);
+                            var path = new ObjC.Object(args[2]).toString();
+                            log('FB', 'Firestore ' + m.split(':')[0].replace('- ', '') + ': ' + path, C.c);
                         } catch (e) {}
                     }
                 });
@@ -965,6 +955,61 @@ try {
     }
 } catch (e) {}
 
+// 9b. FIRDocumentReference getDocument
+try {
+    if (ObjC.classes.FIRDocumentReference) {
+        ['- getDocumentWithCompletion:', '- getDocumentWithSource:completion:'].forEach(function (m) {
+            try {
+                Interceptor.attach(ObjC.classes.FIRDocumentReference[m].implementation, {
+                    onEnter: function (args) {
+                        try {
+                            var ref = new ObjC.Object(args[0]);
+                            log('FB', '📄 getDocument: ' + ref.path().toString(), C.c);
+                        } catch (e) {}
+                    }
+                });
+            } catch (e) {}
+        });
+    }
+} catch (e) {}
+
+// 9c. FIRQuery getDocuments
+try {
+    if (ObjC.classes.FIRQuery) {
+        ['- getDocumentsWithCompletion:', '- getDocumentsWithSource:completion:'].forEach(function (m) {
+            try {
+                Interceptor.attach(ObjC.classes.FIRQuery[m].implementation, {
+                    onEnter: function (args) {
+                        try {
+                            log('FB', '📚 Query getDocuments', C.c);
+                        } catch (e) {}
+                    }
+                });
+            } catch (e) {}
+        });
+    }
+} catch (e) {}
+
+// 9d. FIRDocumentReference setData / updateData
+try {
+    if (ObjC.classes.FIRDocumentReference) {
+        ['- setData:completion:', '- setData:merge:completion:', '- updateData:completion:'].forEach(function (m) {
+            try {
+                Interceptor.attach(ObjC.classes.FIRDocumentReference[m].implementation, {
+                    onEnter: function (args) {
+                        try {
+                            var ref = new ObjC.Object(args[0]);
+                            var data = new ObjC.Object(args[2]);
+                            log('FB', '✏️  WRITE ' + ref.path().toString() + ': ' + data.toString().substring(0, 300), C.y);
+                        } catch (e) {}
+                    }
+                });
+            } catch (e) {}
+        });
+    }
+} catch (e) {}
+
+// 9e. Firebase Analytics
 try {
     if (ObjC.classes.FIRAnalytics) {
         Interceptor.attach(ObjC.classes.FIRAnalytics['+ logEventWithName:parameters:'].implementation, {
@@ -972,14 +1017,31 @@ try {
                 try {
                     var name = new ObjC.Object(args[2]).toString();
                     var params = new ObjC.Object(args[3]);
-                    log('FB', '📊 Event: ' + name + ' ' + (params.isNull ? '' : params.toString().substring(0, 150)), C.c);
+                    var p = params && !params.isNull() ? ' ' + params.toString().substring(0, 200) : '';
+                    log('FB', '📊 Event: ' + name + p, C.c);
                 } catch (e) {}
             }
         });
     }
 } catch (e) {}
 
-log('FB', '✓ Firebase monitoring loaded', C.g);
+// 9f. Firebase Auth state
+try {
+    if (ObjC.classes.FIRAuth) {
+        ['- signInWithCredential:completion:', '- signInWithEmail:password:completion:',
+         '- signInAnonymouslyWithCompletion:', '- signOut:'].forEach(function (m) {
+            try {
+                Interceptor.attach(ObjC.classes.FIRAuth[m].implementation, {
+                    onEnter: function () {
+                        log('FB', '🔐 Auth: ' + m, C.y);
+                    }
+                });
+            } catch (e) {}
+        });
+    }
+} catch (e) {}
+
+log('FB', '✓ Firebase deep monitoring loaded', C.g);
 
 
 // ==========================================
@@ -1003,42 +1065,22 @@ Object.keys(adClasses).forEach(function (cls) {
                     try {
                         var adType = cls.replace('GAD', '').replace('Ad', '');
                         if (args[2] && !new ObjC.Object(args[2]).isNull) {
-                            var adUnitId = new ObjC.Object(args[2]).toString();
-                            log('ADS', '📢 ' + adType + ' load: ' + adUnitId, C.y);
+                            log('ADS', '📢 ' + adType + ': ' + new ObjC.Object(args[2]).toString(), C.y);
                         } else {
                             log('ADS', '📢 ' + adType + ' load', C.y);
                         }
                     } catch (e) {}
                 }
             });
-            log('ADS', cls + ' → monitored', C.g);
         }
     } catch (e) {}
 });
-
-// Ad presentation
-try {
-    if (ObjC.classes.GADFullScreenPresentingAd) {
-        var presentMethods = ObjC.classes.GADFullScreenPresentingAd.$ownMethods;
-        presentMethods.forEach(function (m) {
-            if (m.indexOf('present') !== -1) {
-                try {
-                    Interceptor.attach(ObjC.classes.GADFullScreenPresentingAd[m].implementation, {
-                        onEnter: function () {
-                            log('ADS', '🖥  Ad presenting: ' + m, C.y);
-                        }
-                    });
-                } catch (e) {}
-            }
-        });
-    }
-} catch (e) {}
 
 log('ADS', '✓ AdMob monitoring loaded', C.g);
 
 
 // ==========================================
-// HEARTBEAT & SUMMARY
+// HEARTBEAT
 // ==========================================
 var startTime = Date.now();
 setInterval(function () {
@@ -1048,8 +1090,10 @@ setInterval(function () {
     log('♥', mins + 'm ' + secs + 's — alive', C.g);
 }, 30000);
 
-console.log('\n' + C.bg + C.w + ' ══════════════════════════════════════════════════ ' + C.R);
-console.log(C.bg + C.w + '  AI_Video_Maker Hook Script v2 — FULLY LOADED     ' + C.R);
-console.log(C.bg + C.w + '  Modules: SSL | JB | FRIDA | SCREEN | NET | IAP   ' + C.R);
-console.log(C.bg + C.w + '           UD | KEYCHAIN | FIREBASE | ADS          ' + C.R);
-console.log(C.bg + C.w + ' ══════════════════════════════════════════════════ ' + C.R + '\n');
+console.log('\n' + C.bg + C.w + ' ══════════════════════════════════════════════════════ ' + C.R);
+console.log(C.bg + C.w + '  AI_Video_Maker Hook Script v3 — DIFF-AWARE BUILD    ' + C.R);
+console.log(C.bg + C.w + '  Modules: SSL | JB | FRIDA | SCREEN | NET | IAP      ' + C.R);
+console.log(C.bg + C.w + '           UD | KEYCHAIN | FIREBASE | ADS             ' + C.R);
+console.log(C.bg + C.w + '  Target APIs: Kie.AI | Grok | Gemini | Seedance      ' + C.R);
+console.log(C.bg + C.w + '              Pika | PixVerse | Firebase               ' + C.R);
+console.log(C.bg + C.w + ' ══════════════════════════════════════════════════════ ' + C.R + '\n');
