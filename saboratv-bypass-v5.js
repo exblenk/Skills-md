@@ -1,4 +1,4 @@
-// Frida Script -- SaboraTV Ultimate Bypass v5.1 STABLE (com.plebits.saboratv v6.2.6)
+// Frida Script -- SaboraTV Ultimate Bypass v5.2 STABLE (com.plebits.saboratv v6.2.6)
 // Based on v4.5 + crash fixes from analysis
 // Usage: frida -U -f com.plebits.saboratv -l saboratv-bypass-v5.js --no-pause
 //
@@ -10,10 +10,13 @@
 //   [FIX] Added try/catch around ALL ObjC class access
 //   [FIX] Deferred ObjC hooks to avoid race conditions during startup
 // v5.1 CHANGES:
-//   [FIX] REMOVED strstr/strcmp/strnstr hooks entirely (patching these breaks JSC's JIT)
-//   [FIX] Added caller module filtering for dladdr/dlsym (skip system frameworks)
-//   [FIX] Added Process.setExceptionHandler to survive access-violations gracefully
-//   Frida string detection now relies on ObjC-level hooks (H7 IOSSecuritySuite, H8 Talsec)
+//   [FIX] REMOVED strstr/strcmp/strnstr hooks (breaks JSC JIT trampoline)
+// v5.2 CHANGES (bisection-confirmed):
+//   [FIX] REMOVED signal/sigaction hooks — JSC needs them for JIT signal handlers
+//   [FIX] REMOVED syscall hook — invalid syscall number causes kernel crash
+//   [FIX] kill/raise/__pthread_kill — only block SIGABRT(6)/SIGKILL(9)/SIGTERM(15)
+//         NOT SIGTRAP(5) — JSC JIT uses it internally
+//   Root cause: Group G2 (signal/kill/syscall) confirmed via 4-round bisection
 
 (function () {
     'use strict';
@@ -1075,22 +1078,10 @@
         });
     }
 
-    try {
-        var signalPtr = findExport(null, "signal");
-        if (signalPtr) {
-            Interceptor.attach(signalPtr, {
-                onEnter: function (args) { var sig = args[0].toInt32(); if (sig === 5 || sig === 17) args[1] = ptr(0x1); }
-            });
-        }
-
-        var sigactionPtr = findExport(null, "sigaction");
-        if (sigactionPtr) {
-            Interceptor.attach(sigactionPtr, {
-                onEnter: function (args) { if (args[0].toInt32() === 5) this.blocked = true; },
-                onLeave: function (retval) { if (this.blocked) retval.replace(0); }
-            });
-        }
-    } catch (e) {}
+    // v5.1: signal/sigaction hooks REMOVED — breaks JSC's JIT signal handlers
+    // v5.1: syscall hook REMOVED — invalid syscall number crashes kernel path
+    // v5.1: kill/raise/__pthread_kill — only block termination signals (6=ABORT, 9=KILL, 15=TERM)
+    //        NOT signal 5 (SIGTRAP) — JSC JIT uses it internally
 
     var getpidPtr = findExport(null, "getpid");
     var myPid = 0;
@@ -1101,7 +1092,9 @@
         Interceptor.attach(killPtr, {
             onEnter: function (args) {
                 var pid = args[0].toInt32(); var sig = args[1].toInt32();
-                if (pid === myPid || pid === 0 || pid === -1) { args[0] = ptr(-99); args[1] = ptr(0); }
+                if ((pid === myPid || pid === 0 || pid === -1) && (sig === 6 || sig === 9 || sig === 15)) {
+                    args[0] = ptr(-99); args[1] = ptr(0);
+                }
             }
         });
     }
@@ -1111,7 +1104,7 @@
         Interceptor.attach(raisePtr, {
             onEnter: function (args) {
                 var sig = args[0].toInt32();
-                if (sig === 5 || sig === 6 || sig === 9 || sig === 15) args[0] = ptr(0);
+                if (sig === 6 || sig === 9 || sig === 15) args[0] = ptr(0);
             }
         });
     }
@@ -1121,22 +1114,10 @@
         Interceptor.attach(pthreadKillPtr, {
             onEnter: function (args) {
                 var sig = args[1].toInt32();
-                if (sig === 5 || sig === 6 || sig === 9 || sig === 15) args[1] = ptr(0);
+                if (sig === 6 || sig === 9 || sig === 15) args[1] = ptr(0);
             }
         });
     }
-
-    try {
-        var syscallPtr2 = findExport(null, "syscall");
-        if (syscallPtr2) {
-            Interceptor.attach(syscallPtr2, {
-                onEnter: function (args) {
-                    var num = args[0].toInt32();
-                    if (num === 1 || num === 37) args[0] = ptr(999999);
-                }
-            });
-        }
-    } catch (e) {}
 
     setTimeout(function () {
         ["exit", "_exit", "_Exit", "abort"].forEach(function (fn) {
@@ -1189,7 +1170,7 @@
         }
     } catch (e) {}
 
-    console.log(TAG + ' [S12] fork/ptrace/signal + termination prevention -- loaded (unified)');
+    console.log(TAG + ' [S12] fork/ptrace/kill/raise + termination prevention -- loaded (no signal/sigaction/syscall)');
 
     // ==========================================
     // [S13] MD5/integrity + SecKeyVerifySignature
@@ -1245,7 +1226,7 @@
     // ==========================================
 
     console.log('\n' + TAG + ' =============================================');
-    console.log(TAG + ' SaboraTV Ultimate Bypass v5.1 STABLE');
+    console.log(TAG + ' SaboraTV Ultimate Bypass v5.2 STABLE');
     console.log(TAG + ' =============================================');
     console.log(TAG + ' [H1-H9] Core hooks (sysctl/task_info/files/dyld/NSFileManager/ISS/Talsec/getenv)');
     console.log(TAG + ' [S1]  SSL bypass (ALL attach, NO replace)');
