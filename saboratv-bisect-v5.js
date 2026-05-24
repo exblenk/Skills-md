@@ -9,14 +9,15 @@
     'use strict';
 
     // ============ TOGGLE GROUPS ============
+    // ROUND 2: Testing A-D only (C-level core hooks)
     var ENABLE_A = true;   // H1+H2: sysctl + task_info
     var ENABLE_B = true;   // H3: file access (fopen/open/openat/access/stat/lstat/realpath)
     var ENABLE_C = true;   // H4+H5: dyld image hooks (_dyld_get_image_name/count/header)
     var ENABLE_D = true;   // H9: getenv + NSProcessInfo.environment
-    var ENABLE_E = true;   // S1: SSL/TLS (BoringSSL)
-    var ENABLE_F = true;   // S11: connect + dladdr + dlsym + dlopen
-    var ENABLE_G = true;   // S12: fork/ptrace/signal/kill/raise/pthread_kill/syscall
-    var ENABLE_H = true;   // H6+H7+H8+S3+S5+S6+S8+S13+S14 (ObjC-level, unlikely crash source)
+    var ENABLE_E = false;  // S1: SSL/TLS (BoringSSL)
+    var ENABLE_F = false;  // S11: connect + dladdr + dlsym + dlopen
+    var ENABLE_G = false;  // S12: fork/ptrace/signal/kill/raise/pthread_kill/syscall
+    var ENABLE_H = false;  // H6+H7+H8+S3+S5+S6+S8+S13+S14 (ObjC-level, unlikely crash source)
     // ========================================
 
     var TAG = '[BISECT-v5]';
