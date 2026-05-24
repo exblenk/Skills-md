@@ -16,9 +16,9 @@
     // X2: System ObjC hooks (NSJSONSerialization/NSMutableURLRequest/NSNotificationCenter/NSProcessInfo)
     var ENABLE_X2 = true;
     // X3: App-specific ObjC (GoogleAds/OneSignal/FlutterMethodChannel/canOpenURL/jailbreak ApiResolver/AppDelegate screen)
-    var ENABLE_X3 = false;
+    var ENABLE_X3 = true;
     // X4: Extended ObjC+ApiResolver (H6 extra/H7 exports/H8 ApiResolver+exports/S3 extended/S12 extended/RevenueCat/Sentry/Firebase)
-    var ENABLE_X4 = false;
+    var ENABLE_X4 = true;
     // ============================================
 
     var TAG = '[BISECT-X]';
