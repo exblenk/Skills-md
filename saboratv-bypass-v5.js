@@ -269,37 +269,56 @@
     }, 50);
 
     // ==========================================
-    // [H7] IOSSecuritySuite (basic class methods only — NO module exports)
-    // v5.3: Module exports + broader $ownMethods REMOVED (crash libSwiftCore)
+    // [H7] IOSSecuritySuite — ObjC class methods + $ownMethods
+    // v5.3: NO module exports (crash libSwiftCore) — ObjC-level only
     // ==========================================
+    var issCount = 0;
     try {
         var IOSSecuritySuite = ObjC.classes.IOSSecuritySuite;
         if (IOSSecuritySuite) {
-            var issCount = 0;
-            ["amIJailbroken", "amIJailbrokenWithFailMessage", "amIJailbrokenWithFailedChecks",
-             "amIRunInEmulator", "amIDebugged", "amIReverseEngineered", "amIProxied",
-             "amITampered:", "amIRuntimeHooked:", "denyDebugger", "denySymbolHook:",
-             "amIJailbrokenWithFailedChecksWithFailedJailbreakChecks"].forEach(function (m) {
-                try {
-                    var sel = '+ ' + m;
-                    if (IOSSecuritySuite[sel]) {
-                        Interceptor.attach(IOSSecuritySuite[sel].implementation, {
+            IOSSecuritySuite.$ownMethods.forEach(function (method) {
+                var lower = method.toLowerCase();
+                if (lower.indexOf("ami") !== -1 || lower.indexOf("jailbr") !== -1 ||
+                    lower.indexOf("debug") !== -1 || lower.indexOf("reverse") !== -1 ||
+                    lower.indexOf("hook") !== -1 || lower.indexOf("emulator") !== -1 ||
+                    lower.indexOf("tamper") !== -1 || lower.indexOf("integrity") !== -1 ||
+                    lower.indexOf("deny") !== -1 || lower.indexOf("proxy") !== -1 ||
+                    lower.indexOf("simulator") !== -1) {
+                    try {
+                        Interceptor.attach(IOSSecuritySuite[method].implementation, {
                             onLeave: function (retval) { retval.replace(0x0); }
                         });
                         issCount++;
-                    }
-                } catch (e) {}
+                    } catch (e) {}
+                }
             });
-            console.log(TAG + ' [H7] IOSSecuritySuite (' + issCount + ' hooks, class methods only)');
         }
     } catch (e) {}
+    try {
+        var resolver_iss = new ApiResolver('objc');
+        ['+[* amIJailbroken*]', '+[* amIDebugged*]', '+[* amIReverseEngineered*]',
+         '+[* amIRunInEmulator*]', '+[* amIRuntimeHooked*]', '+[* amITampered*]',
+         '+[* amIProxied*]', '+[* denyDebugger*]', '+[* denySymbolHook*]'].forEach(function (p) {
+            try {
+                resolver_iss.enumerateMatches(p, {
+                    onMatch: function (m) {
+                        if (m.name.indexOf('SecuritySuite') !== -1 || m.name.indexOf('Security') !== -1) {
+                            try { Interceptor.attach(m.address, { onLeave: function (retval) { retval.replace(0x0); } }); issCount++; } catch (e) {}
+                        }
+                    },
+                    onComplete: function () {}
+                });
+            } catch (e) {}
+        });
+    } catch (e) {}
+    console.log(TAG + ' [H7] IOSSecuritySuite (' + issCount + ' hooks, ObjC only)');
 
     // ==========================================
-    // [H8] Talsec/freerasp (basic class methods only — NO ApiResolver/exports)
-    // v5.3: ApiResolver + module exports REMOVED (crash libSwiftCore)
+    // [H8] Talsec/freerasp — class methods + ApiResolver (ObjC-level)
+    // v5.3: NO module exports (crash libSwiftCore) — ObjC-level only
     // ==========================================
+    var talsecCount = 0;
     try {
-        var talsecCount = 0;
         ["SecurityThreatCenter", "TalsecRuntime", "FreeraspFlutterPlugin"].forEach(function (cls) {
             try {
                 var klass = ObjC.classes[cls];
@@ -310,8 +329,29 @@
                 }
             } catch (e) {}
         });
-        console.log(TAG + ' [H8] Talsec (' + talsecCount + ' hooks, basic only)');
     } catch (e) {}
+    try {
+        var resolver_t = new ApiResolver('objc');
+        ['-[* threatDetected*]', '-[* onJailbreak*]', '-[* onDebugger*]',
+         '-[* onHook*]', '-[* onTamper*]', '-[* onReverseEngineering*]',
+         '-[* onDeviceBinding*]', '-[* onUnofficialStore*]', '+[* isThreatDetected*]',
+         '-[* onMalware*]', '-[* securityThreat*]', '-[* onSecurityThreat*]'
+        ].forEach(function (pattern) {
+            try {
+                resolver_t.enumerateMatches(pattern, {
+                    onMatch: function (match) {
+                        var mn = match.name.toLowerCase();
+                        if (mn.indexOf('talsec') !== -1 || mn.indexOf('freerasp') !== -1 ||
+                            mn.indexOf('threat') !== -1 || mn.indexOf('security') !== -1) {
+                            try { Interceptor.attach(match.address, { onLeave: function (retval) { retval.replace(0x0); } }); talsecCount++; } catch (e) {}
+                        }
+                    },
+                    onComplete: function () {}
+                });
+            } catch (e) {}
+        });
+    } catch (e) {}
+    console.log(TAG + ' [H8] Talsec (' + talsecCount + ' hooks, ObjC+ApiResolver)');
 
     // ==========================================
     // [H9] getenv + NSProcessInfo.environment
@@ -959,9 +999,9 @@
     console.log(TAG + ' =============================================');
     console.log(TAG + ' v5.3 FIXES (from v5.2):');
     console.log(TAG + '   REMOVED: ISS module exports (crash libSwiftCore)');
-    console.log(TAG + '   REMOVED: ISS broader $ownMethods (crash libSwiftCore)');
-    console.log(TAG + '   REMOVED: Talsec ApiResolver (crash libSwiftCore)');
     console.log(TAG + '   REMOVED: Talsec module exports (crash libSwiftCore)');
+    console.log(TAG + '   ADDED: ISS $ownMethods + ApiResolver (ObjC safe)');
+    console.log(TAG + '   ADDED: Talsec ApiResolver (ObjC safe)');
     console.log(TAG + '   REMOVED: __pthread_kill hook (crash JSC)');
     console.log(TAG + '   ADDED: SecItemCopyMatching ban block');
     console.log(TAG + '   ADDED: SecureStorage ApiResolver spoof');
