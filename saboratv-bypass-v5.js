@@ -1,15 +1,18 @@
-// Frida Script -- SaboraTV Ultimate Bypass v5.0 STABLE (com.plebits.saboratv v6.2.6)
+// Frida Script -- SaboraTV Ultimate Bypass v5.1 STABLE (com.plebits.saboratv v6.2.6)
 // Based on v4.5 + crash fixes from analysis
 // Usage: frida -U -f com.plebits.saboratv -l saboratv-bypass-v5.js --no-pause
 //
-// v5 CHANGES:
+// v5.0 CHANGES:
 //   [FIX] Removed ALL duplicate hooks (connect/strstr/strcmp/dladdr/dlsym/ptrace/kill/raise/pthread_kill)
 //   [FIX] Converted ALL Interceptor.replace → Interceptor.attach (ssl_verify_peer_cert, AppDelegate methods)
 //   [FIX] Removed ObjC.Block manipulation in FlutterMethodChannel (crash source)
-//   [FIX] Removed duplicate __pthread_kill diagnostic hook
 //   [FIX] Consolidated S11+S14 Frida detection + termination into single section
 //   [FIX] Added try/catch around ALL ObjC class access
 //   [FIX] Deferred ObjC hooks to avoid race conditions during startup
+// v5.1 CHANGES:
+//   [FIX] Added caller module filtering for strstr/strcmp/strnstr/dladdr/dlsym (JSC crash fix)
+//   [FIX] Skip hot C hooks when called from JavaScriptCore/WebKit/system frameworks
+//   [FIX] Added Process.setExceptionHandler to survive access-violations gracefully
 
 (function () {
     'use strict';
@@ -17,6 +20,16 @@
     var TAG = '[SaboraTV-v5]';
     var SPOOF_DEVICE_ID = null;
     var SPOOF_USER_UUID = null;
+
+    Process.setExceptionHandler(function (details) {
+        if (details.type === 'access-violation') {
+            var mod = Process.findModuleByAddress(details.address);
+            var modName = mod ? mod.name + '+0x' + details.address.sub(mod.base).toString(16) : details.address;
+            console.log(TAG + ' [EXCEPTION-CAUGHT] ' + details.type + ' at ' + modName + ' — survived');
+            return true;
+        }
+        return false;
+    });
 
     function randomUUID() {
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -947,8 +960,33 @@
 
     // ==========================================
     // [S11] UNIFIED Frida detection bypass
-    // v5 FIX: Single instance of each hook, no duplicates
+    // v5.1 FIX: Caller filtering to avoid crashing JavaScriptCore/WebKit
+    // Only process hooks when called from app binary or security libs
     // ==========================================
+
+    var _skipModules = {};
+    var _skipRanges = [];
+    (function () {
+        var skipNames = ["JavaScriptCore", "WebKit", "WebCore", "libicucore", "CoreFoundation",
+            "Foundation", "UIKitCore", "UIKit", "CFNetwork", "libnetwork", "libsqlite3",
+            "libc++", "libobjc", "libdispatch", "libswiftCore"];
+        var allMods = Process.enumerateModules();
+        for (var i = 0; i < allMods.length; i++) {
+            for (var j = 0; j < skipNames.length; j++) {
+                if (allMods[i].name.indexOf(skipNames[j]) !== -1) {
+                    _skipRanges.push({ base: allMods[i].base, end: allMods[i].base.add(allMods[i].size) });
+                    break;
+                }
+            }
+        }
+    })();
+
+    function isFromSkippedModule(retAddr) {
+        for (var i = 0; i < _skipRanges.length; i++) {
+            if (retAddr.compare(_skipRanges[i].base) >= 0 && retAddr.compare(_skipRanges[i].end) < 0) return true;
+        }
+        return false;
+    }
 
     var connectPtr = findExport(null, "connect");
     if (connectPtr) {
@@ -970,6 +1008,7 @@
     if (strstrPtr) {
         Interceptor.attach(strstrPtr, {
             onEnter: function (args) {
+                if (isFromSkippedModule(this.returnAddress)) return;
                 if (!args[1].isNull()) {
                     try {
                         var needle = args[1].readUtf8String();
@@ -988,6 +1027,7 @@
     if (strcmpPtr) {
         Interceptor.attach(strcmpPtr, {
             onEnter: function (args) {
+                if (isFromSkippedModule(this.returnAddress)) return;
                 try {
                     if (!args[0].isNull()) {
                         var s = args[0].readUtf8String();
@@ -1003,6 +1043,7 @@
     if (strnstrPtr) {
         Interceptor.attach(strnstrPtr, {
             onEnter: function (args) {
+                if (isFromSkippedModule(this.returnAddress)) return;
                 try {
                     if (!args[1].isNull()) {
                         var needle = args[1].readUtf8String();
@@ -1019,6 +1060,7 @@
         Interceptor.attach(dladdrPtr, {
             onEnter: function (args) { this.info = args[1]; },
             onLeave: function (retval) {
+                if (isFromSkippedModule(this.returnAddress)) return;
                 if (retval.toInt32() !== 0 && !this.info.isNull()) {
                     try { var fname = this.info.add(Process.pointerSize).readPointer().readUtf8String(); if (fname && isSuspiciousDylib(fname)) retval.replace(0); } catch (e) {}
                 }
@@ -1030,6 +1072,7 @@
     if (dlsymPtr) {
         Interceptor.attach(dlsymPtr, {
             onEnter: function (args) {
+                if (isFromSkippedModule(this.returnAddress)) return;
                 try {
                     if (!args[1].isNull()) {
                         var sym = args[1].readUtf8String();
@@ -1252,7 +1295,7 @@
     // ==========================================
 
     console.log('\n' + TAG + ' =============================================');
-    console.log(TAG + ' SaboraTV Ultimate Bypass v5.0 STABLE');
+    console.log(TAG + ' SaboraTV Ultimate Bypass v5.1 STABLE');
     console.log(TAG + ' =============================================');
     console.log(TAG + ' [H1-H9] Core hooks (sysctl/task_info/files/dyld/NSFileManager/ISS/Talsec/getenv)');
     console.log(TAG + ' [S1]  SSL bypass (ALL attach, NO replace)');
