@@ -25,8 +25,16 @@
     var SPOOF_DEVICE_ID = null;
     var SPOOF_USER_UUID = null;
 
-    // v5.2: Exception handler removed — pc+=4 caused cascading JSC corruption.
-    // Root cause fixed by removing G2 hooks instead.
+    // v5.2: Exception handler for diagnostics only (return false = don't interfere)
+    Process.setExceptionHandler(function (details) {
+        try {
+            var pc = details.context.pc;
+            var mod = Process.findModuleByAddress(pc);
+            var modName = mod ? mod.name + '+0x' + pc.sub(mod.base).toString(16) : pc;
+            console.log(TAG + ' [CRASH] ' + details.type + ' at ' + modName);
+        } catch (e) {}
+        return false;
+    });
 
     function randomUUID() {
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -1116,48 +1124,8 @@
         if (abp2) { Interceptor.attach(abp2, { onEnter: function () { Thread.sleep(86400); } }); }
     } catch (e) {}
 
-    // v5.2: Use Interceptor.replace (not attach) on kill/raise — different trampoline
-    // mechanism that may not break JSC. Installed IMMEDIATELY to catch early termination.
-    try {
-        var getpidPtr2 = findExport(null, "getpid");
-        var myPid2 = 0;
-        if (getpidPtr2) { try { myPid2 = new NativeFunction(getpidPtr2, 'int', [])(); } catch (e) {} }
-
-        var killPtr = findExport(null, "kill");
-        if (killPtr) {
-            var origKill = new NativeFunction(killPtr, 'int', ['int', 'int']);
-            Interceptor.replace(killPtr, new NativeCallback(function (pid, sig) {
-                if (pid === myPid2 || pid === 0 || pid === -1) {
-                    console.log(TAG + ' [KILL] blocked kill(' + pid + ', ' + sig + ')');
-                    return 0;
-                }
-                return origKill(pid, sig);
-            }, 'int', ['int', 'int']));
-        }
-
-        var raisePtr = findExport(null, "raise");
-        if (raisePtr) {
-            var origRaise = new NativeFunction(raisePtr, 'int', ['int']);
-            Interceptor.replace(raisePtr, new NativeCallback(function (sig) {
-                if (sig === 5 || sig === 6 || sig === 9 || sig === 15) {
-                    console.log(TAG + ' [KILL] blocked raise(' + sig + ')');
-                    return 0;
-                }
-                return origRaise(sig);
-            }, 'int', ['int']));
-        }
-
-        // Also hook task_terminate and terminate_with_payload via Mach
-        var taskTermPtr = findExport(null, "task_terminate");
-        if (taskTermPtr) {
-            Interceptor.replace(taskTermPtr, new NativeCallback(function (task) {
-                console.log(TAG + ' [KILL] blocked task_terminate()');
-                return 0;
-            }, 'int', ['int']));
-        }
-
-        console.log(TAG + ' [S12] kill/raise/task_terminate replaced (Interceptor.replace)');
-    } catch (e) { console.log(TAG + ' [S12] replace error: ' + e); }
+    // v5.2: NO kill/raise hooks at startup (any Interceptor on these crashes JSC).
+    // sigaction SIG_IGN above handles SIGTERM/SIGTRAP/SIGABRT at kernel level.
 
     // __pthread_kill deferred (less critical, avoid JSC race)
     setTimeout(function () {
