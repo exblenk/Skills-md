@@ -988,6 +988,215 @@
     console.log(TAG + ' [S15] Sandbox write bypass -- loaded');
 
     // ==========================================
+    // [DIAG] Monitoring — find security classes + log API traffic
+    // ==========================================
+
+    // 1. Find ALL security-related ObjC classes (discover actual names)
+    setTimeout(function () {
+        try {
+            var secClasses = [];
+            var allClasses = ObjC.enumerateLoadedClassesSync();
+            var classNames = Object.keys(allClasses);
+            for (var m = 0; m < classNames.length; m++) {
+                var classes = allClasses[classNames[m]];
+                for (var c = 0; c < classes.length; c++) {
+                    var cn = classes[c].toLowerCase();
+                    if (cn.indexOf('security') !== -1 || cn.indexOf('jailbreak') !== -1 ||
+                        cn.indexOf('talsec') !== -1 || cn.indexOf('freerasp') !== -1 ||
+                        cn.indexOf('threat') !== -1 || cn.indexOf('tamper') !== -1 ||
+                        cn.indexOf('integrity') !== -1 || cn.indexOf('rootdetect') !== -1 ||
+                        cn.indexOf('devicecheck') !== -1) {
+                        secClasses.push(classes[c]);
+                    }
+                }
+            }
+            if (secClasses.length > 0) {
+                console.log(TAG + ' [DIAG] Security classes found (' + secClasses.length + '):');
+                secClasses.forEach(function (cls) {
+                    console.log(TAG + '   → ' + cls);
+                    try {
+                        var klass = ObjC.classes[cls];
+                        if (klass) {
+                            var methods = klass.$ownMethods;
+                            if (methods.length > 0 && methods.length <= 20) {
+                                methods.forEach(function (method) {
+                                    console.log(TAG + '       ' + method);
+                                });
+                            } else {
+                                console.log(TAG + '       (' + methods.length + ' methods)');
+                            }
+                        }
+                    } catch (e) {}
+                });
+            } else {
+                console.log(TAG + ' [DIAG] No security classes found in ObjC runtime');
+            }
+        } catch (e) { console.log(TAG + ' [DIAG] Class scan error: ' + e); }
+    }, 500);
+
+    // 2. Monitor keychain writes — detect when app writes ban
+    try {
+        var SecItemAddPtr = findExport("Security", "SecItemAdd");
+        if (SecItemAddPtr) {
+            Interceptor.attach(SecItemAddPtr, {
+                onEnter: function (args) {
+                    try {
+                        var attrs = ObjC.Object(args[0]);
+                        var svce = attrs.objectForKey_(ObjC.classes.NSString.stringWithString_("svce"));
+                        var acct = attrs.objectForKey_(ObjC.classes.NSString.stringWithString_("acct"));
+                        if (svce && !svce.isNull() && acct && !acct.isNull()) {
+                            var sStr = svce.toString(); var aStr = acct.toString();
+                            if (sStr.indexOf("flutter") !== -1 || aStr.indexOf("ban") !== -1 ||
+                                aStr.indexOf("device") !== -1 || aStr.indexOf("user") !== -1) {
+                                var vData = attrs.objectForKey_(ObjC.classes.NSString.stringWithString_("v_Data"));
+                                var val = "";
+                                if (vData && !vData.isNull()) {
+                                    try { val = ObjC.classes.NSString.alloc().initWithData_encoding_(vData, 4).toString(); } catch (e2) { val = vData.toString(); }
+                                }
+                                console.log(TAG + ' [DIAG-KC] SecItemAdd: svce=' + sStr + ' acct=' + aStr + ' val=' + val);
+                                if (aStr === "ban" || aStr.indexOf("ban") !== -1) {
+                                    console.log(TAG + ' [DIAG-KC] *** BAN WRITE DETECTED — BLOCKING ***');
+                                    this.blockBan = true;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                },
+                onLeave: function (retval) {
+                    if (this.blockBan) retval.replace(-1);
+                }
+            });
+        }
+    } catch (e) {}
+
+    // Also monitor SecItemUpdate for ban writes
+    try {
+        var SecItemUpdatePtr = findExport("Security", "SecItemUpdate");
+        if (SecItemUpdatePtr) {
+            Interceptor.attach(SecItemUpdatePtr, {
+                onEnter: function (args) {
+                    try {
+                        var query = ObjC.Object(args[0]);
+                        var acct = query.objectForKey_(ObjC.classes.NSString.stringWithString_("acct"));
+                        if (acct && !acct.isNull()) {
+                            var aStr = acct.toString();
+                            if (aStr === "ban" || aStr.indexOf("ban") !== -1) {
+                                var newAttrs = ObjC.Object(args[1]);
+                                console.log(TAG + ' [DIAG-KC] *** SecItemUpdate BAN — BLOCKING ***');
+                                this.blockBan = true;
+                            }
+                        }
+                    } catch (e) {}
+                },
+                onLeave: function (retval) {
+                    if (this.blockBan) retval.replace(-1);
+                }
+            });
+        }
+    } catch (e) {}
+
+    // 3. Monitor HTTP requests — log URLs with security/ban keywords
+    setTimeout(function () {
+        try {
+            var NSURLSession = ObjC.classes.NSURLSession;
+            if (NSURLSession) {
+                var dataTaskMethods = [
+                    "- dataTaskWithRequest:completionHandler:",
+                    "- dataTaskWithURL:completionHandler:"
+                ];
+                dataTaskMethods.forEach(function (sel) {
+                    try {
+                        var m = NSURLSession[sel];
+                        if (m) {
+                            Interceptor.attach(m.implementation, {
+                                onEnter: function (args) {
+                                    try {
+                                        var req = ObjC.Object(args[2]);
+                                        var url = req.URL ? req.URL().absoluteString().toString() : req.absoluteString().toString();
+                                        var method = req.HTTPMethod ? req.HTTPMethod().toString() : "GET";
+                                        if (url.indexOf("ban") !== -1 || url.indexOf("security") !== -1 ||
+                                            url.indexOf("check") !== -1 || url.indexOf("verify") !== -1 ||
+                                            url.indexOf("device") !== -1 || url.indexOf("jailbreak") !== -1 ||
+                                            url.indexOf("integrity") !== -1 || url.indexOf("auth") !== -1 ||
+                                            url.indexOf("register") !== -1 || url.indexOf("login") !== -1 ||
+                                            url.indexOf("user") !== -1) {
+                                            console.log(TAG + ' [DIAG-HTTP] ' + method + ' ' + url);
+                                            if (method === "POST" || method === "PUT") {
+                                                try {
+                                                    var body = req.HTTPBody();
+                                                    if (body && !body.isNull()) {
+                                                        var bodyStr = ObjC.classes.NSString.alloc().initWithData_encoding_(body, 4).toString();
+                                                        if (bodyStr.length > 500) bodyStr = bodyStr.substring(0, 500) + '...';
+                                                        console.log(TAG + ' [DIAG-HTTP] BODY: ' + bodyStr);
+                                                    }
+                                                } catch (e2) {}
+                                            }
+                                        }
+                                    } catch (e) {}
+                                }
+                            });
+                        }
+                    } catch (e) {}
+                });
+            }
+        } catch (e) {}
+
+        // 4. Monitor ALL JSON responses for ban/security data
+        // (S6 already handles this, but let's log before modifying)
+        console.log(TAG + ' [DIAG] HTTP + Keychain monitoring active');
+    }, 200);
+
+    // 5. Log FlutterMethodChannel — ALL calls (to see security-related ones)
+    setTimeout(function () {
+        try {
+            var FlutterMethodChannel2 = ObjC.classes.FlutterMethodChannel;
+            if (FlutterMethodChannel2) {
+                var setMethodCallHandler = FlutterMethodChannel2["- setMethodCallHandler:"];
+                if (setMethodCallHandler) {
+                    Interceptor.attach(setMethodCallHandler.implementation, {
+                        onEnter: function (args) {
+                            try {
+                                var channel = ObjC.Object(args[0]);
+                                var name = channel.name ? channel.name().toString() : "unknown";
+                                if (name.indexOf("security") !== -1 || name.indexOf("jailbreak") !== -1 ||
+                                    name.indexOf("freerasp") !== -1 || name.indexOf("talsec") !== -1 ||
+                                    name.indexOf("threat") !== -1 || name.indexOf("device") !== -1) {
+                                    console.log(TAG + ' [DIAG-FLUTTER] Security channel registered: ' + name);
+                                }
+                            } catch (e) {}
+                        }
+                    });
+                }
+            }
+        } catch (e) {}
+
+        // Monitor FlutterBasicMessageChannel too
+        try {
+            var FlutterBasicMessageChannel = ObjC.classes.FlutterBasicMessageChannel;
+            if (FlutterBasicMessageChannel) {
+                var setHandler = FlutterBasicMessageChannel["- setMessageHandler:"];
+                if (setHandler) {
+                    Interceptor.attach(setHandler.implementation, {
+                        onEnter: function (args) {
+                            try {
+                                var channel = ObjC.Object(args[0]);
+                                var name = channel.name ? channel.name().toString() : "unknown";
+                                if (name.indexOf("security") !== -1 || name.indexOf("jailbreak") !== -1 ||
+                                    name.indexOf("freerasp") !== -1 || name.indexOf("talsec") !== -1 ||
+                                    name.indexOf("threat") !== -1) {
+                                    console.log(TAG + ' [DIAG-FLUTTER] Security message channel: ' + name);
+                                }
+                            } catch (e) {}
+                        }
+                    });
+                }
+            }
+        } catch (e) {}
+    }, 300);
+
+    console.log(TAG + ' [DIAG] Monitoring hooks installed');
+
+    // ==========================================
     // SUMMARY
     // ==========================================
     console.log('\n' + TAG + ' =============================================');
