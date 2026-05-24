@@ -10,9 +10,10 @@
 //   [FIX] Added try/catch around ALL ObjC class access
 //   [FIX] Deferred ObjC hooks to avoid race conditions during startup
 // v5.1 CHANGES:
-//   [FIX] Added caller module filtering for strstr/strcmp/strnstr/dladdr/dlsym (JSC crash fix)
-//   [FIX] Skip hot C hooks when called from JavaScriptCore/WebKit/system frameworks
+//   [FIX] REMOVED strstr/strcmp/strnstr hooks entirely (patching these breaks JSC's JIT)
+//   [FIX] Added caller module filtering for dladdr/dlsym (skip system frameworks)
 //   [FIX] Added Process.setExceptionHandler to survive access-violations gracefully
+//   Frida string detection now relies on ObjC-level hooks (H7 IOSSecuritySuite, H8 Talsec)
 
 (function () {
     'use strict';
@@ -1004,56 +1005,9 @@
         });
     }
 
-    var strstrPtr = findExport(null, "strstr");
-    if (strstrPtr) {
-        Interceptor.attach(strstrPtr, {
-            onEnter: function (args) {
-                if (isFromSkippedModule(this.returnAddress)) return;
-                if (!args[1].isNull()) {
-                    try {
-                        var needle = args[1].readUtf8String();
-                        if (needle && (needle.indexOf("frida") !== -1 || needle.indexOf("LIBFRIDA") !== -1 ||
-                            needle.indexOf("gum-js-loop") !== -1 || needle.indexOf("linjector") !== -1 ||
-                            needle.indexOf("gadget") !== -1 || needle.indexOf("r2frida") !== -1 ||
-                            needle.indexOf("FridaGadget") !== -1)) this.hide = true;
-                    } catch (e) {}
-                }
-            },
-            onLeave: function (retval) { if (this.hide) retval.replace(ptr(0x0)); }
-        });
-    }
-
-    var strcmpPtr = findExport(null, "strcmp");
-    if (strcmpPtr) {
-        Interceptor.attach(strcmpPtr, {
-            onEnter: function (args) {
-                if (isFromSkippedModule(this.returnAddress)) return;
-                try {
-                    if (!args[0].isNull()) {
-                        var s = args[0].readUtf8String();
-                        if (s && (s.indexOf("frida") !== -1 || s.indexOf("LIBFRIDA") !== -1 || s.indexOf("FridaGadget") !== -1)) this.hide = true;
-                    }
-                } catch (e) {}
-            },
-            onLeave: function (retval) { if (this.hide) retval.replace(1); }
-        });
-    }
-
-    var strnstrPtr = findExport(null, "strnstr");
-    if (strnstrPtr) {
-        Interceptor.attach(strnstrPtr, {
-            onEnter: function (args) {
-                if (isFromSkippedModule(this.returnAddress)) return;
-                try {
-                    if (!args[1].isNull()) {
-                        var needle = args[1].readUtf8String();
-                        if (needle && (needle.indexOf("frida") !== -1 || needle.indexOf("gum-js") !== -1)) this.hide = true;
-                    }
-                } catch (e) {}
-            },
-            onLeave: function (retval) { if (this.hide) retval.replace(ptr(0x0)); }
-        });
-    }
+    // v5.1: strstr/strcmp/strnstr hooks REMOVED — patching these hot libc functions
+    // breaks JavaScriptCore's JIT (access-violation at JSC+0xd06fc).
+    // Frida string detection is handled at ObjC level by H7 (IOSSecuritySuite) and H8 (Talsec).
 
     var dladdrPtr = findExport(null, "dladdr");
     if (dladdrPtr) {
