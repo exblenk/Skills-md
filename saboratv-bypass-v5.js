@@ -1067,10 +1067,29 @@
         });
     }
 
-    // v5.2: ALL G2 hooks REMOVED (signal/sigaction/syscall/kill/raise/__pthread_kill)
-    // Bisection confirmed: even just installing Interceptor trampolines on these
-    // hot libc functions breaks JavaScriptCore's JIT/threading.
-    // Anti-termination relies on exit/abort hooks + ObjC terminateWithSuccess.
+    // v5.2: NO Interceptor hooks on signal/sigaction/syscall/kill/raise/__pthread_kill
+    // (trampolines on these break JSC's JIT). Instead, use sigaction() directly
+    // to ignore termination signals at the kernel level — no trampoline needed.
+    try {
+        var sigactionFn = new NativeFunction(findExport(null, "sigaction"), 'int', ['int', 'pointer', 'pointer']);
+        // struct sigaction: first field is sa_handler (pointer-sized)
+        var saIgnore = Memory.alloc(128);
+        Memory.protect(saIgnore, 128, 'rw-');
+        saIgnore.writePointer(ptr(0x1)); // SIG_IGN
+        // Ignore termination signals the app uses to self-kill
+        sigactionFn(15, saIgnore, ptr(0)); // SIGTERM
+        sigactionFn(5, saIgnore, ptr(0));  // SIGTRAP (anti-debug)
+        sigactionFn(17, saIgnore, ptr(0)); // SIGSTOP — may fail but harmless
+        // SIGABRT needs a real handler (SIG_IGN may not work)
+        var sigabrtHandler = new NativeCallback(function () {
+            console.log(TAG + ' [SIGNAL] SIGABRT caught — ignoring');
+        }, 'void', ['int']);
+        var saAbort = Memory.alloc(128);
+        Memory.protect(saAbort, 128, 'rw-');
+        saAbort.writePointer(sigabrtHandler);
+        sigactionFn(6, saAbort, ptr(0));  // SIGABRT
+        console.log(TAG + ' [S12] sigaction SIG_IGN installed for SIGTERM/SIGTRAP/SIGABRT');
+    } catch (e) { console.log(TAG + ' [S12] sigaction setup error: ' + e); }
 
     setTimeout(function () {
         ["exit", "_exit", "_Exit", "abort"].forEach(function (fn) {
