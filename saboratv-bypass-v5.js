@@ -25,19 +25,8 @@
     var SPOOF_DEVICE_ID = null;
     var SPOOF_USER_UUID = null;
 
-    Process.setExceptionHandler(function (details) {
-        if (details.type === 'access-violation') {
-            try {
-                var pc = details.context.pc;
-                var mod = Process.findModuleByAddress(pc);
-                var modName = mod ? mod.name + '+0x' + pc.sub(mod.base).toString(16) : pc;
-                console.log(TAG + ' [EXCEPTION-SURVIVED] ' + details.type + ' at ' + modName);
-                details.context.pc = pc.add(4);
-            } catch (e) {}
-            return true;
-        }
-        return false;
-    });
+    // v5.2: Exception handler removed — pc+=4 caused cascading JSC corruption.
+    // Root cause fixed by removing G2 hooks instead.
 
     function randomUUID() {
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -1078,46 +1067,10 @@
         });
     }
 
-    // v5.1: signal/sigaction hooks REMOVED — breaks JSC's JIT signal handlers
-    // v5.1: syscall hook REMOVED — invalid syscall number crashes kernel path
-    // v5.1: kill/raise/__pthread_kill — only block termination signals (6=ABORT, 9=KILL, 15=TERM)
-    //        NOT signal 5 (SIGTRAP) — JSC JIT uses it internally
-
-    var getpidPtr = findExport(null, "getpid");
-    var myPid = 0;
-    if (getpidPtr) { try { myPid = new NativeFunction(getpidPtr, 'int', [])(); } catch (e) {} }
-
-    var killPtr = findExport(null, "kill");
-    if (killPtr) {
-        Interceptor.attach(killPtr, {
-            onEnter: function (args) {
-                var pid = args[0].toInt32(); var sig = args[1].toInt32();
-                if ((pid === myPid || pid === 0 || pid === -1) && (sig === 6 || sig === 9 || sig === 15)) {
-                    args[0] = ptr(-99); args[1] = ptr(0);
-                }
-            }
-        });
-    }
-
-    var raisePtr = findExport(null, "raise");
-    if (raisePtr) {
-        Interceptor.attach(raisePtr, {
-            onEnter: function (args) {
-                var sig = args[0].toInt32();
-                if (sig === 6 || sig === 9 || sig === 15) args[0] = ptr(0);
-            }
-        });
-    }
-
-    var pthreadKillPtr = findExport(null, "__pthread_kill");
-    if (pthreadKillPtr) {
-        Interceptor.attach(pthreadKillPtr, {
-            onEnter: function (args) {
-                var sig = args[1].toInt32();
-                if (sig === 6 || sig === 9 || sig === 15) args[1] = ptr(0);
-            }
-        });
-    }
+    // v5.2: ALL G2 hooks REMOVED (signal/sigaction/syscall/kill/raise/__pthread_kill)
+    // Bisection confirmed: even just installing Interceptor trampolines on these
+    // hot libc functions breaks JavaScriptCore's JIT/threading.
+    // Anti-termination relies on exit/abort hooks + ObjC terminateWithSuccess.
 
     setTimeout(function () {
         ["exit", "_exit", "_Exit", "abort"].forEach(function (fn) {
@@ -1170,7 +1123,7 @@
         }
     } catch (e) {}
 
-    console.log(TAG + ' [S12] fork/ptrace/kill/raise + termination prevention -- loaded (no signal/sigaction/syscall)');
+    console.log(TAG + ' [S12] fork/ptrace + exit/abort termination prevention -- loaded (no G2 hooks)');
 
     // ==========================================
     // [S13] MD5/integrity + SecKeyVerifySignature
