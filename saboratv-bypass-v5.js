@@ -1091,30 +1091,78 @@
         console.log(TAG + ' [S12] sigaction SIG_IGN installed for SIGTERM/SIGTRAP/SIGABRT');
     } catch (e) { console.log(TAG + ' [S12] sigaction setup error: ' + e); }
 
-    setTimeout(function () {
-        ["exit", "_exit", "_Exit", "abort"].forEach(function (fn) {
-            try {
-                var p = findExport(null, fn);
-                if (p) {
-                    Interceptor.attach(p, {
-                        onEnter: function (args) {
-                            console.log(TAG + ' [EXIT] ' + fn + '() — holding');
-                            Thread.sleep(86400);
-                        }
-                    });
-                }
-            } catch (e) {}
-        });
+    // v5.2: exit/abort hooks installed IMMEDIATELY (no setTimeout)
+    // to prevent race condition where app exits before hooks are ready
+    ["exit", "_exit", "_Exit", "abort"].forEach(function (fn) {
+        try {
+            var p = findExport(null, fn);
+            if (p) {
+                Interceptor.attach(p, {
+                    onEnter: function (args) {
+                        console.log(TAG + ' [EXIT] ' + fn + '() — holding');
+                        Thread.sleep(86400);
+                    }
+                });
+            }
+        } catch (e) {}
+    });
 
-        try {
-            var abp = findExport(null, "__abort_with_payload");
-            if (abp) { Interceptor.attach(abp, { onEnter: function () { console.log(TAG + ' [EXIT] __abort_with_payload — holding'); Thread.sleep(86400); } }); }
-        } catch (e) {}
-        try {
-            var abp2 = findExport(null, "abort_with_payload");
-            if (abp2) { Interceptor.attach(abp2, { onEnter: function () { Thread.sleep(86400); } }); }
-        } catch (e) {}
-    }, 100);
+    try {
+        var abp = findExport(null, "__abort_with_payload");
+        if (abp) { Interceptor.attach(abp, { onEnter: function () { console.log(TAG + ' [EXIT] __abort_with_payload — holding'); Thread.sleep(86400); } }); }
+    } catch (e) {}
+    try {
+        var abp2 = findExport(null, "abort_with_payload");
+        if (abp2) { Interceptor.attach(abp2, { onEnter: function () { Thread.sleep(86400); } }); }
+    } catch (e) {}
+
+    // v5.2: Deferred kill/raise/__pthread_kill hooks (2s after launch)
+    // JSC JIT init is done by then, so Interceptor trampolines won't crash it
+    setTimeout(function () {
+        var getpidPtr2 = findExport(null, "getpid");
+        var myPid2 = 0;
+        if (getpidPtr2) { try { myPid2 = new NativeFunction(getpidPtr2, 'int', [])(); } catch (e) {} }
+
+        var killPtr = findExport(null, "kill");
+        if (killPtr) {
+            Interceptor.attach(killPtr, {
+                onEnter: function (args) {
+                    var pid = args[0].toInt32(); var sig = args[1].toInt32();
+                    if (pid === myPid2 || pid === 0 || pid === -1) {
+                        console.log(TAG + ' [KILL] blocked kill(' + pid + ', ' + sig + ')');
+                        args[0] = ptr(-99); args[1] = ptr(0);
+                    }
+                }
+            });
+        }
+
+        var raisePtr = findExport(null, "raise");
+        if (raisePtr) {
+            Interceptor.attach(raisePtr, {
+                onEnter: function (args) {
+                    var sig = args[0].toInt32();
+                    if (sig === 5 || sig === 6 || sig === 9 || sig === 15) {
+                        console.log(TAG + ' [KILL] blocked raise(' + sig + ')');
+                        args[0] = ptr(0);
+                    }
+                }
+            });
+        }
+
+        var pthreadKillPtr = findExport(null, "__pthread_kill");
+        if (pthreadKillPtr) {
+            Interceptor.attach(pthreadKillPtr, {
+                onEnter: function (args) {
+                    var sig = args[1].toInt32();
+                    if (sig === 5 || sig === 6 || sig === 9 || sig === 15) {
+                        console.log(TAG + ' [KILL] blocked __pthread_kill(sig=' + sig + ')');
+                        args[1] = ptr(0);
+                    }
+                }
+            });
+        }
+        console.log(TAG + ' [S12] Deferred kill/raise/__pthread_kill hooks installed (2s delay)');
+    }, 2000);
 
     try {
         var resolver_term = new ApiResolver('objc');
