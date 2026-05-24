@@ -24,9 +24,13 @@
 
     Process.setExceptionHandler(function (details) {
         if (details.type === 'access-violation') {
-            var mod = Process.findModuleByAddress(details.address);
-            var modName = mod ? mod.name + '+0x' + details.address.sub(mod.base).toString(16) : details.address;
-            console.log(TAG + ' [EXCEPTION-CAUGHT] ' + details.type + ' at ' + modName + ' — survived');
+            try {
+                var pc = details.context.pc;
+                var mod = Process.findModuleByAddress(pc);
+                var modName = mod ? mod.name + '+0x' + pc.sub(mod.base).toString(16) : pc;
+                console.log(TAG + ' [EXCEPTION-SURVIVED] ' + details.type + ' at ' + modName);
+                details.context.pc = pc.add(4);
+            } catch (e) {}
             return true;
         }
         return false;
@@ -1234,15 +1238,7 @@
         });
     }
 
-    // ==========================================
-    // Exception handler (log only)
-    // ==========================================
-
-    Process.setExceptionHandler(function (details) {
-        console.log(TAG + ' [EXCEPTION] type=' + details.type + ' pc=' + details.context.pc);
-        try { var mod = Process.findModuleByAddress(details.context.pc); if (mod) console.log(TAG + '   module=' + mod.name + '+0x' + details.context.pc.sub(mod.base).toString(16)); } catch (e) {}
-        return false;
-    });
+    // v5.1: Duplicate exception handler REMOVED — the handler at script top (return true) is authoritative
 
     // ==========================================
     // SUMMARY
